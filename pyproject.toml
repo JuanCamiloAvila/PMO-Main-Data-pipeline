@@ -1,0 +1,14 @@
+[project]
+name = "prototipo-pmo"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "certifi>=2026.2.25",
+    "google-auth>=2.49.1",
+    "gspread>=6.2.1",
+    "numpy>=2.4.3",
+    "polars>=1.38.1",
+    "xlsxwriter>=3.2.9",
+]
