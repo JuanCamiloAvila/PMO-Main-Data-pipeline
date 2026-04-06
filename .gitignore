@@ -207,4 +207,8 @@ marimo/_lsp/
 __marimo__/
 
 
+token.json
+client_secret.json
 credentials.json
+.env
+.venv/
