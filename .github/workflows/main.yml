@@ -1,0 +1,47 @@
+name: Automatización PMO (Finanzas y Timesheets)
+
+on:
+  # Permite ejecutar el script manualmente desde GitHub
+  workflow_dispatch: 
+  
+  # Ejecución programada (Ajusta los horarios según necesites)
+  schedule:
+    - cron: '0 11,23 * * *' # Ejecuta a las 6:00 AM y 6:00 PM (Hora Bogotá)
+
+jobs:
+  procesar-datos:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Clonar el repositorio
+        uses: actions/checkout@v4
+
+      - name: Instalar uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          # Lee automáticamente la versión de tu archivo .python-version
+          python-version-file: ".python-version" 
+
+      - name: Sincronizar dependencias
+        # Esto lee el pyproject.toml / uv.lock y crea el entorno virtual al instante
+        run: uv sync
+
+      - name: Ejecutar Script de Ingresos y Gastos
+        env:
+          GOOGLE_OAUTH_TOKEN: ${{ secrets.GOOGLE_OAUTH_TOKEN }}
+        run: |
+          echo "Iniciando actualización de Ingresos y Gastos..."
+          uv run python script_ingresos_gastos.py
+
+      - name: Ejecutar Script de Timesheets
+        env:
+          GOOGLE_OAUTH_TOKEN: ${{ secrets.GOOGLE_OAUTH_TOKEN }}
+        run: |
+          echo "Iniciando actualización de Timesheets..."
+          uv run python Timesheets.py
