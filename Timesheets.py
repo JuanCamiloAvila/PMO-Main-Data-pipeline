@@ -13,12 +13,14 @@ import time
 # ==============================================================================
 # 1. CONFIGURACIÓN DE IDs (Origen y Destino)
 # ==============================================================================
+
+# Origen
 PROJECTS_URL = "https://docs.google.com/spreadsheets/d/1Rx6e85e0vmLAF2SzOEnCl3k3C6VcYG_VRoBpyHxhqqw/edit?gid=0#gid=0"
-BUSINESS_FOLDER_ID = "1DC1RBUERYgg-C0wXbKNdbfC8bDVcLf-g"
-DEV_FOLDER_ID = "1xYvNKtNS_IDbF1TEW6kUZ3U9LyOSd4Yv"
+BUSINESS_FOLDER_ID = "1D4CQzLhIlr6iib3bCkV1juGi_Q5GNL1T"
+DEV_FOLDER_ID = "1usvH3yjnXvWHUKLI0ZrFbRJJ3koaSZ1R"
+PARENT_FOLDER_ID = "1fogkf7ANBU5BeFLUmdGmoh_W2vzQKqKZ"
 
-PARENT_FOLDER_ID = "1E5SvDII6IBGDSqcH3bc2sjNGsu_dLCXG"
-
+# Destino
 ALERTS_FOLDER_ID = "1QF9d74Svyjli0tb0EU492AtCZj0979oC"
 CONSOLIDATED_FOLDER_ID = "1PdRIlCTiwZDxnjUiYXOpklbqWcJgEt5N"
 DEST_DEV_FOLDER_ID = "1T6M1yt8dXexoeXpqd0-mnCU5VhmeHuKV"
