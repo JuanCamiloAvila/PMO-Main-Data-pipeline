@@ -157,8 +157,11 @@ def process_timesheets(gc, folder_id: str, sector_label: str, name_filter: str =
     
     # Si le damos un filtro, descarta todo lo que no coincida
     if name_filter:
-        files = [f for f in files if f['name'].startswith(name_filter)]
-        print(f"  🔍 Filtro aplicado: Encontrados {len(files)} archivos que empiezan con '{name_filter}'")
+        files = [
+            f for f in files
+            if f['name'].startswith(name_filter) and "Plantilla" not in f['name'] 
+            ]
+        print(f"  🔍 Filtro aplicado: Encontrados {len(files)} archivos que empiezan con '{name_filter}', excluyendo Plantilla")
         
         # 👇 NUEVO: Imprimimos la lista de los archivos que SÍ pasaron el filtro
         print("  📑 Archivos a procesar:")
@@ -173,20 +176,34 @@ def process_timesheets(gc, folder_id: str, sector_label: str, name_filter: str =
         return None
 
     for f in files:
-        try:
-            # Usamos la nueva función con reintentos
-            df = get_sheet_data_safely(gc, f['id'])
-            
-            if df is not None:
-                df = df.with_columns([
-                    pl.lit(f['name']).alias("archivo_origen"),
-                    pl.lit(sector_label).alias("Sector_Origen")
-                ])
-                all_dfs.append(df)
-        except Exception as e:
-            print (f"❌ Ignorado: '{f['name']}'. Motivo: {e}")
-            
-        time.sleep(1) # Ritmo base para evitar ahogar la API
+        max_intentos_archivo = 3  # Puedes subirlo si quieres ser más insistente
+        
+        for intento in range(max_intentos_archivo):
+            try:
+                # Intentamos leer la data
+                df = get_sheet_data_safely(gc, f['id'])
+                
+                if df is not None:
+                    df = df.with_columns([
+                        pl.lit(f['name']).alias("archivo_origen"),
+                        pl.lit(sector_label).alias("Sector_Origen")
+                    ])
+                    all_dfs.append(df)
+                
+                # ¡ÉXITO! Si llega a esta línea sin errores, rompemos el ciclo de reintentos 
+                # y pasamos felizmente al siguiente archivo.
+                break 
+                
+            except Exception as e:
+                # Si falló, verificamos si nos quedan intentos
+                if intento < max_intentos_archivo - 1:
+                    print(f"    ⚠️ Error de conexión con '{f['name']}'. Reintentando {intento + 1}/{max_intentos_archivo} en 5s...")
+                    time.sleep(5) # Pausa para dejar que la red o la API respire
+                else:
+                    # Si ya gastamos todos los intentos, nos rendimos con este archivo
+                    print(f"❌ Ignorado definitivamente: '{f['name']}'. Motivo: {e}")
+        
+        time.sleep(1) # Ritmo base normal entre archivos para no ser bloqueados
             
     if not all_dfs:
         return None
@@ -196,32 +213,64 @@ def process_timesheets(gc, folder_id: str, sector_label: str, name_filter: str =
     if "...1" in full_df.columns:
         full_df = full_df.rename({"...1": "consecutivo"})
         
-    # 1. Agregamos un batallón de formatos de fecha para que no se pierda ningún registro válido
+    # 1. Formatos y Diccionario (Claves como TEXTO para evitar el error i8)
     date_formats = ["%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%Y-%m-%d %H:%M:%S", "%d-%m-%Y", "%d.%m.%Y", "%d/%m/%y"]
-    date_expressions = [pl.col("Fecha").str.strptime(pl.Date, format=fmt, strict=False) for fmt in date_formats]
+    
+    mapa_meses = {
+        "1": "ene", "2": "feb", "3": "mar", "4": "abr", "5": "may", "6": "jun", 
+        "7": "jul", "8": "ago", "9": "sep", "10": "oct", "11": "nov", "12": "dic"
+    }
 
+    # 2. TRANSFORMACIÓN INICIAL (Creamos la fecha real primero)
     full_df = full_df.with_columns([
         pl.col("archivo_origen").str.split("-").list.last().str.strip_chars().alias("nombre"),
-        pl.coalesce(date_expressions).alias("Fecha_dt")
+        pl.col("Nombre de Proyecto").str.strip_chars().str.to_uppercase(),
+        pl.col("Cantidad de horas").cast(pl.Utf8).str.replace(",", ".").cast(pl.Float64, strict=False),
+        
+        # Validar la fecha y convertirla en un objeto Date real
+        pl.coalesce([
+            pl.col("Fecha").cast(pl.Utf8).str.strip_chars().str.replace_all(r"\s+", "").str.strptime(pl.Date, format=fmt, strict=False) 
+            for fmt in date_formats
+        ]).alias("Fecha_Temporal")
     ])
 
-    if "Cantidad de horas" in full_df.columns:
-        full_df = full_df.with_columns(
-            pl.col("Cantidad de horas").str.replace(",", ".").cast(pl.Float64, strict=False)
+    # 3. GENERACIÓN EXACTA DE "MES" Y ACTUALIZACIÓN DE "FECHA"
+    full_df = full_df.with_columns([
+        # Convertimos el mes a texto PRIMERO, y luego lo reemplazamos
+        pl.when(pl.col("Fecha_Temporal").is_not_null())
+        .then(
+            pl.col("Fecha_Temporal").dt.month().cast(pl.Utf8).replace(mapa_meses) + 
+            "/" + 
+            pl.col("Fecha_Temporal").dt.year().cast(pl.Utf8)
         )
+        .otherwise(pl.col("Mes"))
+        .alias("Mes"),
 
-    full_df = full_df.with_columns(pl.col("Fecha_dt").alias("Fecha")).drop("Fecha_dt")
+        # Convertimos la fecha validada a texto ISO
+        pl.when(pl.col("Fecha_Temporal").is_not_null())
+        .then(pl.col("Fecha_Temporal").dt.strftime("%Y-%m-%d"))
+        .otherwise(pl.col("Fecha"))
+        .alias("Fecha")
+    ]).drop("Fecha_Temporal")
+
+    # 4. TU FILTRO ORIGINAL RESTAURADO (Protegido contra espacios)
+    conteo_sucio = len(full_df)
     
-    # 👇 NUEVO FILTRO: Conserva la fila si el usuario llenó AL MENOS UNA de estas columnas clave.
-    # Así permitimos que pasen las filas con errores para que la "Lupa" genere las alertas después.
     full_df = full_df.filter(
         pl.col("Cantidad de horas").is_not_null() | 
         (pl.col("Nombre de Proyecto").is_not_null() & (pl.col("Nombre de Proyecto").cast(pl.Utf8).str.strip_chars() != "")) |
         (pl.col("Descripción").is_not_null() & (pl.col("Descripción").cast(pl.Utf8).str.strip_chars() != "")) |
         (pl.col("Category").is_not_null() & (pl.col("Category").cast(pl.Utf8).str.strip_chars() != ""))
     )
+    
+    registros_finales = len(full_df)
 
-    print(f"  ✅ {sector_label}: Procesados {len(full_df)} registros válidos.")
+    # 5. Reporte de auditoría
+    print(f"   📊 Resumen de limpieza {sector_label}:")
+    print(f"      - Registros totales en archivos: {conteo_sucio}")
+    print(f"      - Filas vacías eliminadas: {conteo_sucio - registros_finales}")
+    print(f"      - ✅ REGISTROS VÁLIDOS: {registros_finales}")
+
     return full_df
 
 # ==============================================================================
@@ -303,7 +352,9 @@ def run_pipeline():
             *[pl.col(c).sum() for c in alert_cols],
             pl.col("Fecha").max().alias("max_fecha")
         ]).with_columns([
-            (pl.col("max_fecha") < limit_date).cast(pl.Int32).alias("alerta_fecha")
+            # Convertimos max_fecha a Date solo para esta comparación y evitamos nulos
+            (pl.col("max_fecha").str.strptime(pl.Date, format="%Y-%m-%d", strict=False) < limit_date)
+            .cast(pl.Int32).fill_null(0).alias("alerta_fecha")
         ]).with_columns(
             (pl.sum_horizontal(alert_cols) + pl.col("alerta_fecha")).alias("suma_alertas")
         ).filter(pl.col("suma_alertas") >= 1).sort("suma_alertas", descending=True)
@@ -377,6 +428,9 @@ def run_pipeline():
 
         print("📤 Exportando Consolidado General...")
         export_to_drive(gc, consolidated_df, "Productividad Equi Consolidado", CONSOLIDATED_FOLDER_ID)
+
+        print(f"\n✅ Pipeline completado exitosamente.")
+        print(f"\n📊 Total de registros procesados: {len(consolidated_df)} registros al archivo Productividad Equi Consolidado")
         
     except Exception as e:
         print("\n❌ El pipeline falló. Detalle del error:")
