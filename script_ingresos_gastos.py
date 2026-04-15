@@ -14,21 +14,23 @@ from concurrent.futures import ThreadPoolExecutor
 FOLDER_IDS_PRESUPUESTOS = ["18Ma7mj63Egs_KfyLtkdOPQnvBs6__aGw"]
 MASTER_SPREADSHEET_ID = "1vUcnKrp5EfCbW5mh3L76x_UoyB4m9BPhJ_pKHPbxsGM"
 
-# 1️⃣ ORDEN ACTUALIZADO Y CORREGIDO (archivo_origen y Tipo_Movimiento primero)
+# 1. ORDEN_MAESTRO: Agrega "Fecha" cerca del inicio
 ORDEN_MAESTRO = [
-    "archivo_origen", "Tipo_Movimiento", "Proyecto", "País de facturación", 
+    "archivo_origen", "Tipo_Movimiento", "Fecha", "Proyecto", "País de facturación", 
     "Categoría", "Tipo de gasto", "Descripción", "Producto/Entregable/Servicio", 
     "Monto sin Impuestos", "IGV/IVA/Otros", "Monto con Impuestos", 
     "Moneda", "TC", "USD", "Fecha de entrega del producto", 
-    "Fecha de emisión del comprobante", "Situación"
+    "Fecha de emisión del comprobante", "Situación", "Fecha de factura proveedor"
 ]
 
 TRADUCTOR_INGRESOS = {
     "Proyecto / Cuenta analítica" : "Proyecto",
     "2" : "Proyecto"
 }
+
+# 2. COLUMNAS_INGRESOS: Agrega "Fecha" al principio
 COLUMNAS_INGRESOS = [
-    "Proyecto", "País de facturación", "Producto/Entregable/Servicio", 
+    "Fecha", "Proyecto", "País de facturación", "Producto/Entregable/Servicio", 
     "Monto sin Impuestos", "IGV/IVA/Otros", "Monto con Impuestos", 
     "Moneda", "TC", "USD", "Fecha de entrega del producto", 
     "Fecha de emisión del comprobante", "Situación"
@@ -38,8 +40,10 @@ TRADUCTOR_GASTOS = {
     "Monto Total / (Monto sin Impuestos)": "Monto sin Impuestos",
     "SItuación": "Situación"
 }
+
+# 3. COLUMNAS_GASTOS: Agrega "Fecha" al principio
 COLUMNAS_GASTOS = [
-    "Proyecto", "País de facturación", "Categoría", "Tipo de gasto", 
+    "Fecha", "Proyecto", "País de facturación", "Categoría", "Tipo de gasto", 
     "Descripción", "Fecha de factura proveedor", "Monto sin Impuestos", 
     "IGV/IVA/Otros", "Monto con Impuestos", "Moneda", "TC", "USD", "Situación"
 ]
@@ -151,9 +155,17 @@ def limpiar_dataframe_pmo(raw_rows, file_name, tipo, traductor):
                 mapeo_seguro[col_real] = objetivo
         
         df = df.rename(mapeo_seguro)
+        
+        # --- 🎯 CREACIÓN DE LA COLUMNA FECHA UNIFICADA ---
+        if tipo == "Ingreso" and "Fecha de emisión del comprobante" in df.columns:
+            df = df.with_columns(pl.col("Fecha de emisión del comprobante").alias("Fecha"))
+        elif tipo == "Gasto" and "Fecha de factura proveedor" in df.columns:
+            df = df.with_columns(pl.col("Fecha de factura proveedor").alias("Fecha"))
+        else:
+            df = df.with_columns(pl.lit("").alias("Fecha"))
 
         # --- 🧹 4. PURGA DE FILAS FANTASMA ---
-        columnas_clave = [c for c in ["Proyecto", "Situación", "Monto con Impuestos", "Descripción", "Producto/Entregable/Servicio"] if c in df.columns]
+        columnas_clave = [c for c in ["Proyecto", "Situación", "Monto con Impuestos", "Descripción", "Fecha"] if c in df.columns]
         if columnas_clave:
             condicion_datos_reales = pl.lit(False)
             for c in columnas_clave:
@@ -176,10 +188,10 @@ def limpiar_dataframe_pmo(raw_rows, file_name, tipo, traductor):
             )
             df = df.filter((pl.col("_temp_monto") != "") & (pl.col("_temp_monto").cast(pl.Float64, strict=False) > 0)).drop("_temp_monto")
 
-        if tipo == "Gasto" and "Fecha de factura proveedor" in df.columns:
+        if tipo == "Gasto":
             df = df.filter(
-                (pl.col("Fecha de factura proveedor").cast(pl.Utf8).str.strip_chars() != "") &
-                (pl.col("Fecha de factura proveedor").is_not_null())
+                (pl.col("Fecha").cast(pl.Utf8).str.strip_chars() != "") &
+                (pl.col("Fecha").is_not_null())
             )
 
         # --- 📣 6. AUDITORÍA SIMPLE EN CONSOLA ---
