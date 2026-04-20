@@ -184,6 +184,9 @@ def process_timesheets(gc, folder_id: str, sector_label: str, name_filter: str =
                 df = get_sheet_data_safely(gc, f['id'])
                 
                 if df is not None:
+                    # Renombre para que la columna "Nombre de Proyecto" de los timesheets sea igual a la columna "Proyecto" del master de ingresos y gastos
+                    if "Nombre de Proyecto" in df.columns:
+                        df = df.rename({"Nombre de Proyecto": "Proyecto"})
                     df = df.with_columns([
                         pl.lit(f['name']).alias("archivo_origen"),
                         pl.lit(sector_label).alias("Sector_Origen")
@@ -224,7 +227,7 @@ def process_timesheets(gc, folder_id: str, sector_label: str, name_filter: str =
     # 2. TRANSFORMACIÓN INICIAL (Creamos la fecha real primero)
     full_df = full_df.with_columns([
         pl.col("archivo_origen").str.split("-").list.last().str.strip_chars().alias("nombre"),
-        pl.col("Nombre de Proyecto").str.strip_chars().str.to_uppercase(),
+        pl.col("Proyecto").str.strip_chars(),
         pl.col("Cantidad de horas").cast(pl.Utf8).str.replace(",", ".").cast(pl.Float64, strict=False),
         
         # Validar la fecha y convertirla en un objeto Date real
@@ -258,7 +261,7 @@ def process_timesheets(gc, folder_id: str, sector_label: str, name_filter: str =
     
     full_df = full_df.filter(
         pl.col("Cantidad de horas").is_not_null() | 
-        (pl.col("Nombre de Proyecto").is_not_null() & (pl.col("Nombre de Proyecto").cast(pl.Utf8).str.strip_chars() != "")) |
+        (pl.col("Proyecto").is_not_null() & (pl.col("Proyecto").cast(pl.Utf8).str.strip_chars() != "")) |
         (pl.col("Descripción").is_not_null() & (pl.col("Descripción").cast(pl.Utf8).str.strip_chars() != "")) |
         (pl.col("Category").is_not_null() & (pl.col("Category").cast(pl.Utf8).str.strip_chars() != ""))
     )
@@ -324,14 +327,15 @@ def run_pipeline():
         
         category_cond = pl.col("Category").is_null() | (pl.col("Category") == "")
         subcat_cond = pl.col("Sub-Category").is_null() | (pl.col("Sub-Category") == "")
-        projects_cond = (pl.col("Category") == "Proyectos") & (pl.col("Nombre de Proyecto").is_null() | (pl.col("Nombre de Proyecto") == ""))
+        projects_cond = (pl.col("Category") == "Proyectos") & (pl.col("Proyecto").is_null() | (pl.col("Proyecto") == ""))
         hours_cond = pl.col("Cantidad de horas").is_null()
         desc_cond = pl.col("Descripción").is_null() | (pl.col("Descripción") == "")
+
         project_name_cond = (
-            pl.col("Nombre de Proyecto").is_not_null() & 
-            (pl.col("Nombre de Proyecto") != "") & 
-            (pl.col("Nombre de Proyecto") != "Otro") & 
-            ~pl.col("Nombre de Proyecto").is_in(valid_projects_list)
+            pl.col("Proyecto").is_not_null() & 
+            (pl.col("Proyecto") != "") & 
+            (pl.col("Proyecto") != "Otro") & 
+            ~pl.col("Proyecto").is_in(valid_projects_list)
         )
 
         base_alerts_df = consolidated_df.with_columns([
@@ -385,7 +389,7 @@ def run_pipeline():
             "Día",
             "Category",
             "Sub-Category",
-            "Nombre de Proyecto",
+            "Proyecto",
             "Descripción",
             "Cantidad de horas",
             "Mes",
@@ -411,7 +415,7 @@ def run_pipeline():
             "Día",
             "Category",
             "Sub-Category",
-            "Nombre de Proyecto",
+            "Proyecto",
             "Descripción",
             "Cantidad de horas",
             "Mes"

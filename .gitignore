@@ -207,8 +207,12 @@ marimo/_lsp/
 __marimo__/
 
 
+# Seguridad de credenciales
+*.json
 token.json
-client_secret.json
 credentials.json
-.env
+client_secret.json
+
+# Entornos virtuales y caché
 .venv/
+__pycache__/
