@@ -1,4 +1,5 @@
 import os
+import sys # <-- AÑADIDO: Para poder avisarle a GitHub si hay un error fatal
 import json
 import polars as pl
 import gspread
@@ -14,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 FOLDER_IDS_PRESUPUESTOS = ["18Ma7mj63Egs_KfyLtkdOPQnvBs6__aGw"]
 MASTER_SPREADSHEET_ID = "1vUcnKrp5EfCbW5mh3L76x_UoyB4m9BPhJ_pKHPbxsGM"
 
-# 1. ORDEN_MAESTRO: Agrega "Fecha" cerca del inicio (TUS COLUMNAS INTACTAS)
+# 1. ORDEN_MAESTRO
 ORDEN_MAESTRO = [
     "archivo_origen", "Tipo_Movimiento", "Fecha", "Proyecto", "País de facturación", 
     "Categoría", "Tipo de gasto", "Descripción", "Producto/Entregable/Servicio", 
@@ -28,7 +29,7 @@ TRADUCTOR_INGRESOS = {
     "2" : "Proyecto"
 }
 
-# 2. COLUMNAS_INGRESOS: Agrega "Fecha" al principio
+# 2. COLUMNAS_INGRESOS
 COLUMNAS_INGRESOS = [
     "Fecha", "Proyecto", "País de facturación", "Producto/Entregable/Servicio", 
     "Monto sin Impuestos", "IGV/IVA/Otros", "Monto con Impuestos", 
@@ -41,7 +42,7 @@ TRADUCTOR_GASTOS = {
     "SItuación": "Situación"
 }
 
-# 3. COLUMNAS_GASTOS: Agrega "Fecha" al principio
+# 3. COLUMNAS_GASTOS
 COLUMNAS_GASTOS = [
     "Fecha", "Proyecto", "País de facturación", "Categoría", "Tipo de gasto", 
     "Descripción", "Fecha de factura proveedor", "Monto sin Impuestos", 
@@ -60,6 +61,8 @@ def get_gspread_client():
 
 def export_to_drive(gc, df: pl.DataFrame, file_id: str, tab_name: str):
     if df is None or df.is_empty(): 
+        # <-- AÑADIDO: Alerta visible en logs si no hay datos
+        print(f"⚠️ ATENCIÓN: No hay datos para exportar a la pestaña '{tab_name}'. Se omitirá este paso.")
         return
     
     datos_exportar = [list(df.columns)]
@@ -248,7 +251,6 @@ def run_finanzas_pipeline():
     procesados = 0
     contador_lock = threading.Lock()
     
-    # 3️⃣ SISTEMA DE RASTREO
     archivos_exitosos = []
 
     def worker(f):
@@ -258,7 +260,6 @@ def run_finanzas_pipeline():
         while intentos < 3:
             try:
                 sh = gc.open_by_key(f['id'])
-                # 🔥 AQUÍ ESTÁ EL RANGO HASTA LA 'P' Y SIN LÍMITE DE FILAS
                 rangos = ["'Proyección - Ingresos'!A:Z", "'Proyección - Gastos'!A:Z"]
                 batch = sh.values_batch_get(rangos)
                 
@@ -268,7 +269,7 @@ def run_finanzas_pipeline():
                 res = {"in": df_in, "out": df_out}
                 with contador_lock:
                     procesados += 1
-                    archivos_exitosos.append(f['name']) # Guarda el archivo exitoso
+                    archivos_exitosos.append(f['name'])
                     print(f"[{procesados}/{total_archivos}] ✅ Completado: {f['name']}")
                 break
             except gspread.exceptions.APIError as e:
@@ -278,10 +279,10 @@ def run_finanzas_pipeline():
                     print(f"⚠️ CUOTA EXCEDIDA en {f['name']}. Reintentando en {tiempo_espera}s... (Intento {intentos}/3)")
                     time.sleep(tiempo_espera)
                 else: 
-                    print(f"🚨 API Error en {f['name']}: {e}") # Reporta fallos de Google
+                    print(f"🚨 API Error en {f['name']}: {e}") 
                     break
             except Exception as e: 
-                print(f"🚨 Error fatal inesperado en {f['name']}: {e}") # Reporta fallos de código
+                print(f"🚨 Error fatal inesperado en {f['name']}: {e}") 
                 break
         return res
 
@@ -294,6 +295,7 @@ def run_finanzas_pipeline():
             if r['in'] is not None: lista_in.append(r['in'])
             if r['out'] is not None: lista_out.append(r['out'])
 
+    base_looker = None
     if lista_in or lista_out:
         print("\n⚡ Consolidando datos...")
         def union(lista): return pl.concat(lista, how="diagonal") if lista else None
@@ -307,17 +309,16 @@ def run_finanzas_pipeline():
         comb = [df for df in [master_in, master_out] if df is not None]
         if comb:
             base_looker = pl.concat(comb, how="diagonal")
-            
             cols_looker = [c for c in ORDEN_MAESTRO if c in base_looker.columns]
             base_looker = base_looker.select(cols_looker)
-            
             export_to_drive(gc, base_looker, MASTER_SPREADSHEET_ID, "Base_Looker")
 
         print(f"\n✅ Pipeline Finalizado. Total de archivos procesados: {procesados}/{total_archivos}")
     else:
-        print("❌ No se recolectaron datos.")
+        # <-- AÑADIDO: Si no se recolectan datos, fallamos intencionalmente para que GitHub te avise
+        print("❌ CRÍTICO: No se recolectaron datos. Revisa tus filtros o los archivos en Drive.")
+        sys.exit(1)
 
-    # 3️⃣ ALERTA FINAL DE ARCHIVOS NO PROCESADOS
     if procesados < total_archivos:
         todos_los_nombres = [f['name'] for f in files_validos]
         faltantes = set(todos_los_nombres) - set(archivos_exitosos)
@@ -328,5 +329,10 @@ def run_finanzas_pipeline():
     return base_looker
 
 if __name__ == "__main__":
-    run_finanzas_pipeline()
-
+    try:
+        run_finanzas_pipeline()
+    except Exception as e:
+        # <-- AÑADIDO: Esto le avisa a GitHub Actions que el script falló rotundamente
+        print("\n❌ Error crítico de ejecución:")
+        traceback.print_exc()
+        sys.exit(1)
