@@ -32,16 +32,25 @@ jobs:
         # Esto lee el pyproject.toml / uv.lock y crea el entorno virtual al instante
         run: uv sync
 
-      - name: Ejecutar Script de Ingresos y Gastos
+      - name: Run Finances Script
         env:
           GOOGLE_OAUTH_TOKEN: ${{ secrets.GOOGLE_OAUTH_TOKEN }}
         run: |
           echo "Iniciando actualización de Ingresos y Gastos..."
           uv run python script_ingresos_gastos.py
 
-      - name: Ejecutar Script de Timesheets
+      - name: Run Timesheets Script
         env:
           GOOGLE_OAUTH_TOKEN: ${{ secrets.GOOGLE_OAUTH_TOKEN }}
         run: |
           echo "Iniciando actualización de Timesheets..."
-          uv run python Timesheets.py
+          uv run python script_timesheets.py
+
+      #'''
+      #- name: Run Looker OBT Consolidator
+      #  env:
+      #    GOOGLE_OAUTH_TOKEN: ${{ secrets.GOOGLE_OAUTH_TOKEN }}
+      #  run: |
+      #    echo "Iniciando generación de tabla maestra para Looker Studio..."
+      #    uv run python datasource_consolidator.py
+        
