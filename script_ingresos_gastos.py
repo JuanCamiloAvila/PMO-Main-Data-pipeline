@@ -17,7 +17,7 @@ MASTER_SPREADSHEET_ID = "1vUcnKrp5EfCbW5mh3L76x_UoyB4m9BPhJ_pKHPbxsGM"
 
 # 1. ORDEN_MAESTRO
 ORDEN_MAESTRO = [
-    "archivo_origen", "Tipo_Movimiento", "Fecha", "Proyecto", "País de facturación", 
+    "archivo_origen", "Tipo_Movimiento", "Fecha", "Proyecto", "proyecto_id", "País de facturación", 
     "Categoría", "Tipo de gasto", "Descripción", "Producto/Entregable/Servicio", 
     "Monto sin Impuestos", "IGV/IVA/Otros", "Monto con Impuestos", 
     "Moneda", "TC", "USD", "Fecha de entrega del producto", 
@@ -29,9 +29,9 @@ TRADUCTOR_INGRESOS = {
     "2" : "Proyecto"
 }
 
-# 2. COLUMNAS_INGRESOS
+# 2. COLUMNAS_INGRESOS (¡Aquí añadimos proyecto_id!)
 COLUMNAS_INGRESOS = [
-    "Fecha", "Proyecto", "País de facturación", "Producto/Entregable/Servicio", 
+    "Fecha", "Proyecto", "proyecto_id", "País de facturación", "Producto/Entregable/Servicio", 
     "Monto sin Impuestos", "IGV/IVA/Otros", "Monto con Impuestos", 
     "Moneda", "TC", "USD", "Fecha de entrega del producto", 
     "Fecha de emisión del comprobante", "Situación"
@@ -42,9 +42,9 @@ TRADUCTOR_GASTOS = {
     "SItuación": "Situación"
 }
 
-# 3. COLUMNAS_GASTOS
+# 3. COLUMNAS_GASTOS (¡Aquí añadimos proyecto_id!)
 COLUMNAS_GASTOS = [
-    "Fecha", "Proyecto", "País de facturación", "Categoría", "Tipo de gasto", 
+    "Fecha", "Proyecto", "proyecto_id", "País de facturación", "Categoría", "Tipo de gasto", 
     "Descripción", "Fecha de factura proveedor", "Monto sin Impuestos", 
     "IGV/IVA/Otros", "Monto con Impuestos", "Moneda", "TC", "USD", "Situación"
 ]
@@ -309,24 +309,77 @@ def run_finanzas_pipeline():
         comb = [df for df in [master_in, master_out] if df is not None]
         if comb:
             base_looker = pl.concat(comb, how="diagonal")
+            
+            # 0. Asegurarnos de no perder el proyecto_id al filtrar columnas
             cols_looker = [c for c in ORDEN_MAESTRO if c in base_looker.columns]
+            if "proyecto_id" in base_looker.columns and "proyecto_id" not in cols_looker:
+                cols_looker.append("proyecto_id")
+            
             base_looker = base_looker.select(cols_looker)
-            export_to_drive(gc, base_looker, MASTER_SPREADSHEET_ID, "Base_Looker")
+            
+            # =========================================================
+            # 🌟 CREACIÓN DEL ESQUEMA DIMENSIONAL (FINANZAS)
+            # =========================================================
+            print("\n🧩 Generando IDs y Tablas Dimensionales para Finanzas...")
+            
+            # 1. Dimensión Proyecto
+            cols_proyecto = ["Proyecto", "proyecto_id"] if "proyecto_id" in base_looker.columns else ["Proyecto"]
+            dim_proyecto_fin = base_looker.select(
+                cols_proyecto
+            ).unique().drop_nulls(subset=["Proyecto"]).with_row_index(name="ID_Proyecto", offset=1)
+            
+            # 2. Dimensión Categoría Finanzas
+            cols_cat = [c for c in ["Categoría", "Tipo de gasto"] if c in base_looker.columns]
+            if cols_cat:
+                dim_categoria_fin = base_looker.select(
+                    cols_cat
+                ).unique().with_row_index(name="ID_Categoria_Fin", offset=1)
+            else:
+                dim_categoria_fin = None
+            
+            # 3. Unir IDs a la base
+            fact_finanzas = base_looker.join(dim_proyecto_fin, on=cols_proyecto, how="left")
+            if dim_categoria_fin is not None:
+                fact_finanzas = fact_finanzas.join(dim_categoria_fin, on=cols_cat, how="left")
+            
+            # 4. Generar ID único y limpiar
+            fact_finanzas = fact_finanzas.with_row_index(name="ID_Registro_Finanzas", offset=1)
+            
+            columnas_hechos_fin = [
+                "ID_Registro_Finanzas", "ID_Proyecto", "ID_Categoria_Fin", 
+                "archivo_origen", "Tipo_Movimiento", "Fecha", "País de facturación", 
+                "Descripción", "Producto/Entregable/Servicio", "Monto sin Impuestos", 
+                "IGV/IVA/Otros", "Monto con Impuestos", "Moneda", "TC", "USD", 
+                "Fecha de entrega del producto", "Fecha de emisión del comprobante", 
+                "Situación", "Fecha de factura proveedor"
+            ]
+            
+            fact_finanzas = fact_finanzas.select([c for c in columnas_hechos_fin if c in fact_finanzas.columns])
+            
+            # =========================================================
+            # 📤 EXPORTACIÓN AL MASTER SPREADSHEET
+            # =========================================================
+            print("📤 Exportando Esquema Dimensional de Finanzas...")
+            
+            export_to_drive(gc, base_looker, MASTER_SPREADSHEET_ID, "Base_Looker_Plana")
+            export_to_drive(gc, dim_proyecto_fin, MASTER_SPREADSHEET_ID, "Dim_Proyecto_Finanzas")
+            if dim_categoria_fin is not None:
+                export_to_drive(gc, dim_categoria_fin, MASTER_SPREADSHEET_ID, "Dim_Categoria_Finanzas")
+            export_to_drive(gc, fact_finanzas, MASTER_SPREADSHEET_ID, "Fact_Finanzas")
 
-        print(f"\n✅ Pipeline Finalizado. Total de archivos procesados: {procesados}/{total_archivos}")
-    else:
-        # <-- AÑADIDO: Si no se recolectan datos, fallamos intencionalmente para que GitHub te avise
-        print("❌ CRÍTICO: No se recolectaron datos. Revisa tus filtros o los archivos en Drive.")
-        sys.exit(1)
+            print(f"\n✅ Pipeline Finalizado. Registros en Fact Table Finanzas: {len(fact_finanzas)}")
+        else:
+            print("❌ CRÍTICO: No se recolectaron datos. Revisa tus filtros o los archivos en Drive.")
+            sys.exit(1)
 
-    if procesados < total_archivos:
-        todos_los_nombres = [f['name'] for f in files_validos]
-        faltantes = set(todos_los_nombres) - set(archivos_exitosos)
-        print("\n⚠️ ALERTA - Archivos con error no procesados:")
-        for archivo in faltantes:
-            print(f"  ❌ {archivo}")
+        if procesados < total_archivos:
+            todos_los_nombres = [f['name'] for f in files_validos]
+            faltantes = set(todos_los_nombres) - set(archivos_exitosos)
+            print("\n⚠️ ALERTA - Archivos con error no procesados:")
+            for archivo in faltantes:
+                print(f"  ❌ {archivo}")
 
-    return base_looker
+        return fact_finanzas
 
 if __name__ == "__main__":
     try:
