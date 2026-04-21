@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 FOLDER_IDS_PRESUPUESTOS = ["18Ma7mj63Egs_KfyLtkdOPQnvBs6__aGw"]
 MASTER_SPREADSHEET_ID = "1vUcnKrp5EfCbW5mh3L76x_UoyB4m9BPhJ_pKHPbxsGM"
 
-# 1. ORDEN_MAESTRO: Agrega "Fecha" cerca del inicio
+# 1. ORDEN_MAESTRO: Agrega "Fecha" cerca del inicio (TUS COLUMNAS INTACTAS)
 ORDEN_MAESTRO = [
     "archivo_origen", "Tipo_Movimiento", "Fecha", "Proyecto", "País de facturación", 
     "Categoría", "Tipo de gasto", "Descripción", "Producto/Entregable/Servicio", 
@@ -174,9 +174,20 @@ def limpiar_dataframe_pmo(raw_rows, file_name, tipo, traductor):
 
         total_inicial = len(df) 
         
-        # --- 🛡️ 5. FILTROS ESTRICTOS FINANCIEROS ---
+        # --- 🛡️ 5. FILTROS ESTRICTOS FINANCIEROS Y LIMPIEZA NUMÉRICA ---
         if "Situación" in df.columns:
             df = df.filter(pl.col("Situación").cast(pl.Utf8).str.to_uppercase().str.strip_chars().is_in(["REAL", "PROYECTADO"]))
+
+        if "USD" in df.columns:
+            df = df.with_columns(
+                pl.col("USD").cast(pl.Utf8)
+                .str.replace_all(r"[^0-9,.]", "")
+                .str.replace_all(r"\.", "")
+                .str.replace(",", ".")
+                .alias("USD")
+            )
+            df = df.with_columns(pl.col("USD").cast(pl.Float64, strict=False))
+            df = df.filter(pl.col("USD").is_not_null() & (pl.col("USD") > 0))
 
         if "Monto con Impuestos" in df.columns:
             df = df.with_columns(
@@ -239,7 +250,8 @@ def run_finanzas_pipeline():
         while intentos < 3:
             try:
                 sh = gc.open_by_key(f['id'])
-                rangos = ["'Proyección - Ingresos'!A1:Z1000", "'Proyección - Gastos'!A1:Z1000"]
+                # 🔥 AQUÍ ESTÁ EL RANGO HASTA LA 'P' Y SIN LÍMITE DE FILAS
+                rangos = ["'Proyección - Ingresos'!A:Z", "'Proyección - Gastos'!A:Z"]
                 batch = sh.values_batch_get(rangos)
                 
                 df_in = limpiar_dataframe_pmo(batch['valueRanges'][0].get('values', []), f['name'], "Ingreso", TRADUCTOR_INGRESOS)
