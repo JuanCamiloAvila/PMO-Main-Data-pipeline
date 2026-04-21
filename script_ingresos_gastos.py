@@ -205,6 +205,14 @@ def limpiar_dataframe_pmo(raw_rows, file_name, tipo, traductor):
                 (pl.col("Fecha").is_not_null())
             )
 
+        if "Proyecto" in df.columns:
+            df = df.with_columns(
+                pl.col("Proyecto")
+                .str.extract(r"^([\d-]+)", 1)
+                .str.replace_all("-", "_")
+                .alias("proyecto_id")
+        )
+
         # --- 📣 6. AUDITORÍA SIMPLE EN CONSOLA ---
         filas_finales = len(df)
         if total_inicial > filas_finales:
@@ -317,5 +325,8 @@ def run_finanzas_pipeline():
         for archivo in faltantes:
             print(f"  ❌ {archivo}")
 
+    return base_looker
+
 if __name__ == "__main__":
     run_finanzas_pipeline()
+
