@@ -13,6 +13,7 @@ import time
 # 1. CONFIGURACIÓN DE IDs (Origen y Destino)
 # ==============================================================================
 PROJECTS_URL = "https://docs.google.com/spreadsheets/d/1Rx6e85e0vmLAF2SzOEnCl3k3C6VcYG_VRoBpyHxhqqw/edit?gid=0#gid=0"
+STAFF_RATES_URL = "https://docs.google.com/spreadsheets/d/1PFVuVLKbNWh2TJEG-x2K8-KvHQBuqbRWurAx1PI67FA/edit#gid=1413870694"
 BUSINESS_FOLDER_ID = "1D4CQzLhIlr6iib3bCkV1juGi_Q5GNL1T"
 DEV_FOLDER_ID = "1usvH3yjnXvWHUKLI0ZrFbRJJ3koaSZ1R"
 PARENT_FOLDER_ID = "1fogkf7ANBU5BeFLUmdGmoh_W2vzQKqKZ"
@@ -259,9 +260,31 @@ def run_pipeline():
             # <-- AÑADIDO: Error real para GitHub Actions
             print("❌ CRÍTICO: No se encontró ningún dato en ninguna carpeta para consolidar.")
             sys.exit(1)
-            
+        
+        print("👥 Importando tasas de personal...")
+        # Abre la hoja (asegúrate que el nombre de la pestaña sea "Rates" o el que corresponda)
+        staff_sheet = gc.open_by_url(STAFF_RATES_URL).worksheet("Rates") 
+        staff_rates_raw = safe_read_sheet(staff_sheet)
+        
+        # Limpiamos y preparamos las tasas
+        staff_rates_df = staff_rates_raw.select([
+            pl.col("Nombre").alias("nombre"),
+            pl.col("Costo interno")  # Este es el valor por hora en tu Excel
+                .cast(pl.Utf8)
+                .str.replace(",", ".")
+                .cast(pl.Float64)
+        ])
+
         print("\n⚡ Consolidando datos...")
         consolidated_df = pl.concat(dfs_to_combine, how="diagonal")
+
+        # --- UNIÓN CON TASAS Y CÁLCULO DE COSTO ---
+        consolidated_df = consolidated_df.join(staff_rates_df, on="nombre", how="left")
+        
+        # Corregido: multiplicamos por 'Costo interno' y le llamamos 'costo_rate_interno'
+        consolidated_df = consolidated_df.with_columns(
+            ((pl.col("Cantidad de horas") /8) * pl.col("Costo interno").fill_null(0)).alias("costo_rate_interno")
+        )
 
         if "Unnamed" in consolidated_df.columns:
             consolidated_df = consolidated_df.rename({"Unnamed": "consecutivo"})
@@ -323,9 +346,12 @@ def run_pipeline():
         export_to_drive(gc, alerts_summary_df, "Resumen Alertas", ALERTS_FOLDER_ID)
         export_to_drive(gc, alerts_detail_df, "Detalle Alertas", ALERTS_FOLDER_ID)
 
+        # Configuración final de columnas para el consolidado
         orden_r = [
             "archivo_origen", "nombre", "consecutivo", "Fecha", "Día", "Category",
-            "Sub-Category", "Proyecto", "Descripción", "Cantidad de horas", "Mes"
+            "Sub-Category", "Proyecto", "Descripción", "Cantidad de horas", "Mes",
+            "Costo interno",      # Esta es la tasa (precio/hora)
+            "costo_rate_interno"  # Este es el total (horas * tasa)
         ]
         
         if "Sector_Origen" in consolidated_df.columns:
@@ -335,80 +361,18 @@ def run_pipeline():
         consolidated_df = consolidated_df.select(columnas_finales)
 
         # =========================================================
-        # 🌟 CREACIÓN DEL ESQUEMA DIMENSIONAL (STAR SCHEMA)
+        # 📤 EXPORTACIÓN ÚNICA DEL CONSOLIDADO PLANA
         # =========================================================
-        print("🧩 Generando IDs y Tablas Dimensionales...")
-
-        # 1. Dimensión Personal (Usuarios)
-        # Tomamos nombres únicos, quitamos nulos y les asignamos un ID secuencial
-        dim_personal = consolidated_df.select(
-            ["nombre", "Sector_Origen"]
-        ).unique().drop_nulls(subset=["nombre"]).with_row_index(name="ID_Personal", offset=1)
-
-        # 2. Dimensión Categoría
-        dim_categoria = consolidated_df.select(
-            ["Category", "Sub-Category"]
-        ).unique().drop_nulls(subset=["Category"]).with_row_index(name="ID_Categoria", offset=1)
-
-        # 3. Dimensión Proyecto
-        # (Aseguramos que el ID de proyecto también se incluya si existe)
-        cols_proyecto = ["Proyecto", "proyecto_id"] if "proyecto_id" in consolidated_df.columns else ["Proyecto"]
-        dim_proyecto = consolidated_df.select(
-            cols_proyecto
-        ).unique().drop_nulls(subset=["Proyecto"]).with_row_index(name="ID_Proyecto", offset=1)
-
-        # 4. Cruzar los IDs hacia la Tabla de Hechos (Fact Table)
-        # Unimos las dimensiones con la tabla maestra para traer los IDs
-        fact_table = consolidated_df.join(dim_personal, on=["nombre", "Sector_Origen"], how="left")
-        fact_table = fact_table.join(dim_categoria, on=["Category", "Sub-Category"], how="left")
-        fact_table = fact_table.join(dim_proyecto, on=cols_proyecto, how="left")
-
-        # 5. Generar un ID único para cada fila de registro de horas y seleccionar solo lo necesario
-        fact_table = fact_table.with_row_index(name="ID_Registro", offset=1)
-        
-        columnas_hechos = [
-            "ID_Registro", "ID_Personal", "ID_Categoria", "ID_Proyecto", 
-            "Fecha", "Día", "Mes", "Cantidad de horas", "Descripción", "archivo_origen"
-        ]
-        
-        # Filtramos para que la Fact Table solo tenga las columnas correctas
-        fact_table = fact_table.select([col for col in columnas_hechos if col in fact_table.columns])
-        
-        # =========================================================
-        # 📤 EXPORTACIÓN MULTIPLE (Usando tu función intacta)
-        # =========================================================
-        print("📤 Exportando Esquema Dimensional a Google Drive...")
-        
-        # Opcional: Mantener la tabla plana original por si alguien la quiere en Excel
-        export_to_drive(gc, consolidated_df, "Productividad Equi Consolidado", CONSOLIDATED_FOLDER_ID)
-
-        # Usamos tu función export_to_drive 4 veces seguidas para los nuevos archivos
-        export_to_drive(gc, dim_personal, "Dim_Personal", CONSOLIDATED_FOLDER_ID)
-        export_to_drive(gc, dim_categoria, "Dim_Categoria", CONSOLIDATED_FOLDER_ID)
-        export_to_drive(gc, dim_proyecto, "Dim_Proyecto", CONSOLIDATED_FOLDER_ID)
-        export_to_drive(gc, fact_table, "Fact_Timesheet", CONSOLIDATED_FOLDER_ID)
-
-        print(f"\n✅ Pipeline completado exitosamente.")
-        print(f"📊 Registros en Fact Table: {len(fact_table)}")
-        
-        return fact_table
-
-    except Exception as e:
-        print("\n❌ El pipeline falló. Detalle del error:")
-        traceback.print_exc()
-        sys.exit(1)
-
-
-        print("📤 Exportando Consolidado General...")
+        print("📤 Exportando Consolidado General (Tabla Plana)...")
         export_to_drive(gc, consolidated_df, "Productividad Equi Consolidado", CONSOLIDATED_FOLDER_ID)
 
         print(f"\n✅ Pipeline completado exitosamente.")
-        print(f"\n📊 Total de registros procesados: {len(consolidated_df)} registros al archivo Productividad Equi Consolidado")
+        print(f"📊 Registros en Consolidado: {len(consolidated_df)}")
         
         return consolidated_df
 
     except Exception as e:
-        # <-- AÑADIDO: La parte más importante. Si esto falla, rompe el script para que GitHub se entere.
+        # Bloque de error único y limpio
         print("\n❌ El pipeline falló. Detalle del error:")
         traceback.print_exc()
         sys.exit(1)
