@@ -45,6 +45,13 @@ jobs:
         run: |
           echo "Iniciando actualización de Timesheets..."
           uv run python script_timesheets.py
+          
+      - name: Run Horas Presupuestadas Script
+        env:
+          GOOGLE_OAUTH_TOKEN: ${{ secrets.GOOGLE_OAUTH_TOKEN }}
+        run: |
+          echo "Iniciando actualización de Timesheets..."
+          uv run python script_presupuesto_horas.py
 
       #'''
       #- name: Run Looker OBT Consolidator

@@ -19,6 +19,10 @@ TEST_FILE_IDS = [
 
 DWH_FOLDER_ID = "1_8cyY32pxRXU3Au0OZOor1wNN7uXO-wr"
 
+# 🆕 VARIABLES PARA EL ARCHIVO DE COSTOS (⚠️ REEMPLAZA ESTOS VALORES)
+RATES_FILE_ID = "1PFVuVLKbNWh2TJEG-x2K8-KvHQBuqbRWurAx1PI67FA" 
+RATES_SHEET_NAME = "Rates" # Nombre exacto de la pestaña donde están los costos
+
 # ==============================================================================
 # 2. AUTENTICACIÓN Y EXPORTACIÓN
 # ==============================================================================
@@ -61,12 +65,11 @@ def export_to_drive(gc, df: pl.DataFrame, file_name: str, folder_id: str):
             else: raise e
 
 # ==============================================================================
-# 3. EXTRACCIÓN Y RECORTADO DE TABLA
+# 3. EXTRACCIÓN Y RECORTADO DE TABLAS
 # ==============================================================================
 def extraer_equipo_interno(raw_rows, file_name):
     if not raw_rows or len(raw_rows) < 2: return None
     
-    # 🛡️ ESCUDO ANTI-ERRORES
     cleaned_rows = []
     for row in raw_rows:
         clean_row = ["" if str(cell).strip().startswith("#") else cell for cell in row]
@@ -74,7 +77,6 @@ def extraer_equipo_interno(raw_rows, file_name):
         
     raw_rows = cleaned_rows
     
-    # 1. Buscar la fila donde están los encabezados
     header_idx = -1
     for i, row in enumerate(raw_rows[:30]): 
         row_upper = [str(cell).upper().strip() for cell in row]
@@ -83,22 +85,17 @@ def extraer_equipo_interno(raw_rows, file_name):
             break
             
     if header_idx == -1: return None
-
     raw_headers = raw_rows[header_idx]
     
-    # 2. 🎯 EL FRENO DE MANO: Recortar la tabla hasta encontrar el Total
     data_rows = []
     for row in raw_rows[header_idx + 1:]:
         row_upper = [str(cell).upper().strip() for cell in row]
-        # Si la fila dice "TOTAL" o "EQUIPO EXTERNO", cortamos el bucle ahí mismo
         if any("TOTAL" in cell or "EQUIPO EXTERNO" in cell for cell in row_upper):
             break
         data_rows.append(row)
     
-    # Si la tabla interna estaba vacía
     if not data_rows: return None
 
-    # 3. Normalizar columnas
     max_cols = max(len(raw_headers), max((len(r) for r in data_rows), default=0))
     padded_headers = raw_headers + [""] * (max_cols - len(raw_headers))
     
@@ -121,7 +118,6 @@ def extraer_equipo_interno(raw_rows, file_name):
     
     if not col_nombre or not col_horas: return None
 
-    # 4. Limpiar nombres vacíos y plantillas ("[Insertar nombre]")
     df = df.filter(
         (pl.col(col_nombre).str.strip_chars() != "") & 
         (~pl.col(col_nombre).str.to_uppercase().str.contains("INSERTAR"))
@@ -133,7 +129,6 @@ def extraer_equipo_interno(raw_rows, file_name):
     ])
     
     df = df.filter(pl.col("Horas_Presupuestadas").is_not_null())
-    
     nombre_archivo_limpio = file_name.replace("Productividad: ", "").strip()
     
     df = df.with_columns([
@@ -143,11 +138,44 @@ def extraer_equipo_interno(raw_rows, file_name):
 
     return df.select(["archivo_origen", "Proyecto", "nombre", "Horas_Presupuestadas"])
 
+# 🆕 NUEVA FUNCIÓN: Extraer Costos
+def obtener_costos_internos(gc):
+    print("💸 Leyendo archivo de Costos Internos...")
+    try:
+        sh = gc.open_by_key(RATES_FILE_ID)
+        ws = sh.worksheet(RATES_SHEET_NAME)
+        raw_data = ws.get_all_values()
+        
+        if not raw_data or len(raw_data) < 2:
+            return None
+            
+        headers = raw_data[0]
+        data = raw_data[1:]
+        df_costos = pl.DataFrame(data, schema=headers, orient="row").with_columns(pl.all().cast(pl.Utf8))
+        
+        # Búsqueda dinámica de las columnas (ajusta las palabras clave si es necesario)
+        col_nombre = next((c for c in df_costos.columns if "NOMBRE" in c.upper()), None)
+        col_costo = next((c for c in df_costos.columns if "COSTO" in c.upper()), None)
+        
+        if not col_nombre or not col_costo:
+            print("⚠️ No se encontraron las columnas de 'Nombre' o 'Costo' en tu archivo de costos.")
+            return None
+            
+        # Limpieza de datos (elimina signos de dólar, espacios, etc., para castear a numérico)
+        df_costos = df_costos.select([
+            pl.col(col_nombre).str.strip_chars().alias("nombre_costo"),
+            pl.col(col_costo).str.replace_all(r"[^\d\.\,]", "").str.replace(",", ".").cast(pl.Float64, strict=False).alias("Costo_interno")
+        ])
+        return df_costos
+    except Exception as e:
+        print(f"🚨 Error obteniendo archivo de costos: {e}")
+        return None
+
 # ==============================================================================
-# 4. PIPELINE PRINCIPAL (MODO PRUEBA CON 2 ARCHIVOS)
+# 4. PIPELINE PRINCIPAL 
 # ==============================================================================
 def run_presupuestos_pipeline():
-    print("🚀 Iniciando Extracción de Horas Presupuestadas (Modo Piloto)...")
+    print("🚀 Iniciando Extracción de Horas Presupuestadas...")
     gc = get_gspread_client()
     
     total_archivos = len(TEST_FILE_IDS)
@@ -200,8 +228,34 @@ def run_presupuestos_pipeline():
         )
         
         master_presupuesto = master_presupuesto.with_row_index(name="ID_Presupuesto", offset=1)
+        
+        # 🆕 OBTENER COSTOS Y HACER EL CRUCE (JOIN)
+        df_costos = obtener_costos_internos(gc)
+        
+        if df_costos is not None:
+            print("🧮 Calculando costos por proyecto...")
+            # Normalizamos los nombres a minúsculas para asegurar que hagan match ("Juan Perez" == "juan perez")
+            master_presupuesto = master_presupuesto.with_columns(pl.col("nombre").str.strip_chars().str.to_lowercase().alias("nombre_join"))
+            df_costos = df_costos.with_columns(pl.col("nombre_costo").str.strip_chars().str.to_lowercase().alias("nombre_join"))
+            
+            # Left Join
+            master_presupuesto = master_presupuesto.join(df_costos, on="nombre_join", how="left")
+            
+            # 🆕 APLICAR LA FÓRMULA DE COSTO
+            master_presupuesto = master_presupuesto.with_columns(
+                ((pl.col("Horas_Presupuestadas") / 8) * pl.col("Costo_interno")).alias("Costo_Total_Proyecto")
+            ).drop("nombre_join") # Limpiamos la columna temporal
+        else:
+            # En caso de fallar, creamos columnas vacías para no romper el select final
+            master_presupuesto = master_presupuesto.with_columns([
+                pl.lit(None).alias("Costo_interno"),
+                pl.lit(None).alias("Costo_Total_Proyecto")
+            ])
+
+        # Selección final de columnas incluyendo las nuevas métricas
         master_presupuesto = master_presupuesto.select([
-            "ID_Presupuesto", "proyecto_id", "Proyecto", "nombre", "Horas_Presupuestadas", "archivo_origen"
+            "ID_Presupuesto", "proyecto_id", "Proyecto", "nombre", 
+            "Horas_Presupuestadas", "Costo_interno", "Costo_Total_Proyecto", "archivo_origen"
         ])
         
         print(f"\n📤 Exportando a Carpeta DWH: {DWH_FOLDER_ID}")
