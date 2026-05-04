@@ -1,5 +1,5 @@
 import os
-import sys # <-- AÑADIDO: Para poder avisarle a GitHub si hay un error fatal
+import sys
 import json
 import polars as pl
 import gspread
@@ -15,9 +15,9 @@ from concurrent.futures import ThreadPoolExecutor
 FOLDER_IDS_PRESUPUESTOS = ["18Ma7mj63Egs_KfyLtkdOPQnvBs6__aGw"]
 MASTER_SPREADSHEET_ID = "1vUcnKrp5EfCbW5mh3L76x_UoyB4m9BPhJ_pKHPbxsGM"
 
-# 1. ORDEN_MAESTRO
+# 1. ORDEN_MAESTRO (Sin proyecto_id)
 ORDEN_MAESTRO = [
-    "archivo_origen", "Tipo_Movimiento", "Fecha", "Proyecto", "proyecto_id", "País de facturación", 
+    "archivo_origen", "Tipo_Movimiento", "Fecha", "Proyecto", "País de facturación", 
     "Categoría", "Tipo de gasto", "Descripción", "Producto/Entregable/Servicio", 
     "Monto sin Impuestos", "IGV/IVA/Otros", "Monto con Impuestos", 
     "Moneda", "TC", "USD", "Fecha de entrega del producto", 
@@ -29,9 +29,9 @@ TRADUCTOR_INGRESOS = {
     "2" : "Proyecto"
 }
 
-# 2. COLUMNAS_INGRESOS (¡Aquí añadimos proyecto_id!)
+# 2. COLUMNAS_INGRESOS (Sin proyecto_id)
 COLUMNAS_INGRESOS = [
-    "Fecha", "Proyecto", "proyecto_id", "País de facturación", "Producto/Entregable/Servicio", 
+    "Fecha", "Proyecto", "País de facturación", "Producto/Entregable/Servicio", 
     "Monto sin Impuestos", "IGV/IVA/Otros", "Monto con Impuestos", 
     "Moneda", "TC", "USD", "Fecha de entrega del producto", 
     "Fecha de emisión del comprobante", "Situación"
@@ -42,9 +42,9 @@ TRADUCTOR_GASTOS = {
     "SItuación": "Situación"
 }
 
-# 3. COLUMNAS_GASTOS (¡Aquí añadimos proyecto_id!)
+# 3. COLUMNAS_GASTOS (Sin proyecto_id)
 COLUMNAS_GASTOS = [
-    "Fecha", "Proyecto", "proyecto_id", "País de facturación", "Categoría", "Tipo de gasto", 
+    "Fecha", "Proyecto", "País de facturación", "Categoría", "Tipo de gasto", 
     "Descripción", "Fecha de factura proveedor", "Monto sin Impuestos", 
     "IGV/IVA/Otros", "Monto con Impuestos", "Moneda", "TC", "USD", "Situación"
 ]
@@ -61,7 +61,6 @@ def get_gspread_client():
 
 def export_to_drive(gc, df: pl.DataFrame, file_id: str, tab_name: str):
     if df is None or df.is_empty(): 
-        # <-- AÑADIDO: Alerta visible en logs si no hay datos
         print(f"⚠️ ATENCIÓN: No hay datos para exportar a la pestaña '{tab_name}'. Se omitirá este paso.")
         return
     
@@ -70,7 +69,8 @@ def export_to_drive(gc, df: pl.DataFrame, file_id: str, tab_name: str):
         datos_exportar.append(["" if val is None else val for val in row])
     
     intentos, exito = 0, False
-    while intentos < 3 and not exito:
+    # 🔥 CAMBIADO: De 3 a 6 intentos en la exportación
+    while intentos < 6 and not exito:
         try:
             sh = gc.open_by_key(file_id) 
             try:
@@ -83,10 +83,10 @@ def export_to_drive(gc, df: pl.DataFrame, file_id: str, tab_name: str):
             print(f"📤 Exportación exitosa a {tab_name} ({len(df)} filas)")
             time.sleep(2)
         except gspread.exceptions.APIError as e:
-            if "429" in str(e):
+            # 🔥 Agregados 500, 502, 503 y 504 a la exportación
+            if any(err in str(e) for err in ["429", "500", "502", "503", "504"]):
                 intentos += 1
                 time.sleep(20 * intentos)
-            else: raise e
 
 def limpiar_dataframe_pmo(raw_rows, file_name, tipo, traductor):
     if not raw_rows or len(raw_rows) < 2: return None
@@ -208,14 +208,6 @@ def limpiar_dataframe_pmo(raw_rows, file_name, tipo, traductor):
                 (pl.col("Fecha").is_not_null())
             )
 
-        if "Proyecto" in df.columns:
-            df = df.with_columns(
-                pl.col("Proyecto")
-                .str.extract(r"^([\d-]+)", 1)
-                .str.replace_all("-", "_")
-                .alias("proyecto_id")
-        )
-
         # --- 📣 6. AUDITORÍA SIMPLE EN CONSOLA ---
         filas_finales = len(df)
         if total_inicial > filas_finales:
@@ -257,7 +249,8 @@ def run_finanzas_pipeline():
         nonlocal procesados
         res = None
         intentos = 0
-        while intentos < 3:
+        # 🔥 CAMBIADO: De 3 a 6 intentos en la lectura de archivos
+        while intentos < 6:
             try:
                 sh = gc.open_by_key(f['id'])
                 rangos = ["'Proyección - Ingresos'!A:Z", "'Proyección - Gastos'!A:Z"]
@@ -273,10 +266,11 @@ def run_finanzas_pipeline():
                     print(f"[{procesados}/{total_archivos}] ✅ Completado: {f['name']}")
                 break
             except gspread.exceptions.APIError as e:
-                if "429" in str(e) or "500" in str(e) or "502" in str(e):
+                if any(err in str(e) for err in ["429", "500", "502", "503", "504"]):
                     intentos += 1
                     tiempo_espera = 20 * intentos
-                    print(f"⚠️ CUOTA EXCEDIDA en {f['name']}. Reintentando en {tiempo_espera}s... (Intento {intentos}/3)")
+                    # 🔥 CAMBIADO: El mensaje ahora refleja "(Intento X/6)"
+                    print(f"⚠️ CUOTA EXCEDIDA en {f['name']}. Reintentando en {tiempo_espera}s... (Intento {intentos}/6)")
                     time.sleep(tiempo_espera)
                 else: 
                     print(f"🚨 API Error en {f['name']}: {e}") 
@@ -310,64 +304,19 @@ def run_finanzas_pipeline():
         if comb:
             base_looker = pl.concat(comb, how="diagonal")
             
-            # 0. Asegurarnos de no perder el proyecto_id al filtrar columnas
+            # Filtramos columnas para mantener solo las de ORDEN_MAESTRO
             cols_looker = [c for c in ORDEN_MAESTRO if c in base_looker.columns]
-            if "proyecto_id" in base_looker.columns and "proyecto_id" not in cols_looker:
-                cols_looker.append("proyecto_id")
-            
             base_looker = base_looker.select(cols_looker)
             
-            # =========================================================
-            # 🌟 CREACIÓN DEL ESQUEMA DIMENSIONAL (FINANZAS)
-            # =========================================================
-            print("\n🧩 Generando IDs y Tablas Dimensionales para Finanzas...")
-            
-            # 1. Dimensión Proyecto
-            cols_proyecto = ["Proyecto", "proyecto_id"] if "proyecto_id" in base_looker.columns else ["Proyecto"]
-            dim_proyecto_fin = base_looker.select(
-                cols_proyecto
-            ).unique().drop_nulls(subset=["Proyecto"]).with_row_index(name="ID_Proyecto", offset=1)
-            
-            # 2. Dimensión Categoría Finanzas
-            cols_cat = [c for c in ["Categoría", "Tipo de gasto"] if c in base_looker.columns]
-            if cols_cat:
-                dim_categoria_fin = base_looker.select(
-                    cols_cat
-                ).unique().with_row_index(name="ID_Categoria_Fin", offset=1)
-            else:
-                dim_categoria_fin = None
-            
-            # 3. Unir IDs a la base
-            fact_finanzas = base_looker.join(dim_proyecto_fin, on=cols_proyecto, how="left")
-            if dim_categoria_fin is not None:
-                fact_finanzas = fact_finanzas.join(dim_categoria_fin, on=cols_cat, how="left")
-            
-            # 4. Generar ID único y limpiar
-            fact_finanzas = fact_finanzas.with_row_index(name="ID_Registro_Finanzas", offset=1)
-            
-            columnas_hechos_fin = [
-                "ID_Registro_Finanzas", "ID_Proyecto", "ID_Categoria_Fin", 
-                "archivo_origen", "Tipo_Movimiento", "Fecha", "País de facturación", 
-                "Descripción", "Producto/Entregable/Servicio", "Monto sin Impuestos", 
-                "IGV/IVA/Otros", "Monto con Impuestos", "Moneda", "TC", "USD", 
-                "Fecha de entrega del producto", "Fecha de emisión del comprobante", 
-                "Situación", "Fecha de factura proveedor"
-            ]
-            
-            fact_finanzas = fact_finanzas.select([c for c in columnas_hechos_fin if c in fact_finanzas.columns])
+            print(f"📊 Total registros consolidados en Base_Looker: {len(base_looker)} (Ingresos + Gastos)")
             
             # =========================================================
             # 📤 EXPORTACIÓN AL MASTER SPREADSHEET
             # =========================================================
-            print("📤 Exportando Esquema Dimensional de Finanzas...")
-            
-            export_to_drive(gc, base_looker, MASTER_SPREADSHEET_ID, "Base_Looker_Plana")
-            export_to_drive(gc, dim_proyecto_fin, MASTER_SPREADSHEET_ID, "Dim_Proyecto_Finanzas")
-            if dim_categoria_fin is not None:
-                export_to_drive(gc, dim_categoria_fin, MASTER_SPREADSHEET_ID, "Dim_Categoria_Finanzas")
-            export_to_drive(gc, fact_finanzas, MASTER_SPREADSHEET_ID, "Fact_Finanzas")
+            print("📤 Exportando Base_Looker consolidada...")
+            export_to_drive(gc, base_looker, MASTER_SPREADSHEET_ID, "Base_Looker")
 
-            print(f"\n✅ Pipeline Finalizado. Registros en Fact Table Finanzas: {len(fact_finanzas)}")
+            print(f"\n✅ Pipeline Finalizado.")
         else:
             print("❌ CRÍTICO: No se recolectaron datos. Revisa tus filtros o los archivos en Drive.")
             sys.exit(1)
@@ -379,13 +328,10 @@ def run_finanzas_pipeline():
             for archivo in faltantes:
                 print(f"  ❌ {archivo}")
 
-        return fact_finanzas
-
 if __name__ == "__main__":
     try:
         run_finanzas_pipeline()
     except Exception as e:
-        # <-- AÑADIDO: Esto le avisa a GitHub Actions que el script falló rotundamente
         print("\n❌ Error crítico de ejecución:")
         traceback.print_exc()
         sys.exit(1)
