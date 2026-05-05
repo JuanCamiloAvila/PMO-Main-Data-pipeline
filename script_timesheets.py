@@ -268,12 +268,15 @@ def run_pipeline():
         
         # Limpiamos y preparamos las tasas
         staff_rates_df = staff_rates_raw.select([
-            pl.col("Nombre").alias("nombre"),
-            pl.col("Costo interno")  # Este es el valor por hora en tu Excel
-                .cast(pl.Utf8)
-                .str.replace(",", ".")
-                .cast(pl.Float64)
-        ])
+        pl.col("Nombre").alias("nombre"),
+        pl.col("Costo interno")  # Este es el valor por hora en tu Excel
+        .cast(pl.Utf8)
+        .str.replace(",", ".")
+        # 🛠️ CAMBIO AQUÍ: Añadimos strict=False
+        .cast(pl.Float64, strict=False) 
+        # Ahora que los vacíos son "null", esto los vuelve 0.0
+        .fill_null(0.0)
+])
 
         print("\n⚡ Consolidando datos...")
         consolidated_df = pl.concat(dfs_to_combine, how="diagonal")
