@@ -261,33 +261,57 @@ def run_pipeline():
             print("❌ CRÍTICO: No se encontró ningún dato en ninguna carpeta para consolidar.")
             sys.exit(1)
         
-        print("👥 Importando tasas de personal...")
-        # Abre la hoja (asegúrate que el nombre de la pestaña sea "Rates" o el que corresponda)
-        staff_sheet = gc.open_by_url(STAFF_RATES_URL).worksheet("Rates") 
+        print("👥 Importando tasas y mapeo de correos...")
+        staff_sheet = gc.open_by_url(STAFF_RATES_URL).worksheet("Rates")
         staff_rates_raw = safe_read_sheet(staff_sheet)
         
-        # Limpiamos y preparamos las tasas
+        # Seleccionamos: 
+        # 'Nombre' (Col A) para el cruce.
+        # 'Nombre_oficial' (Col J) para corregir el dato actual.
+        # 'Email' (Col X/final) para la nueva columna.
         staff_rates_df = staff_rates_raw.select([
-        pl.col("Nombre").alias("nombre"),
-        pl.col("Costo interno")  # Este es el valor por hora en tu Excel
-        .cast(pl.Utf8)
-        .str.replace(",", ".")
-        # 🛠️ CAMBIO AQUÍ: Añadimos strict=False
-        .cast(pl.Float64, strict=False) 
-        # Ahora que los vacíos son "null", esto los vuelve 0.0
-        .fill_null(0.0)
-])
+            pl.col("Nombre").alias("nombre_archivo"),
+            pl.col("Nombre_oficial").alias("nombre_limpio"),
+            pl.col("Correo").alias("correo_electronico"), # Esta irá al final
+            pl.col("Costo interno")
+                .cast(pl.Utf8)
+                .str.replace(",", ".")
+                .cast(pl.Float64, strict=False)
+                .fill_null(0.0)
+        ])
 
-        print("\n⚡ Consolidando datos...")
+        print("\n⚡ Consolidando y normalizando nombres...")
         consolidated_df = pl.concat(dfs_to_combine, how="diagonal")
 
-        # --- UNIÓN CON TASAS Y CÁLCULO DE COSTO ---
-        consolidated_df = consolidated_df.join(staff_rates_df, on="nombre", how="left")
-        
-        # Corregido: multiplicamos por 'Costo interno' y le llamamos 'costo_rate_interno'
-        consolidated_df = consolidated_df.with_columns(
-            ((pl.col("Cantidad de horas") /8) * pl.col("Costo interno").fill_null(0)).alias("costo_rate_interno")
+        # Join con el Master de Rates
+        consolidated_df = consolidated_df.join(
+            staff_rates_df, 
+            left_on="nombre", 
+            right_on="nombre_archivo", 
+            how="left"
         )
+        
+        # 1. Calculamos el costo
+        # 2. Reemplazamos el valor de 'nombre' por el 'nombre_limpio' (Oficial)
+        consolidated_df = consolidated_df.with_columns([
+            ((pl.col("Cantidad de horas") / 8) * pl.col("Costo interno").fill_null(0)).alias("costo_rate_interno"),
+            pl.coalesce([pl.col("nombre_limpio"), pl.col("nombre")]).alias("nombre")
+        ])
+        
+        # --- CÁLCULO DE COSTO Y LIMPIEZA DE IDENTIDAD ---
+        consolidated_df = consolidated_df.with_columns([
+            # Cálculo de costo
+            ((pl.col("Cantidad de horas") / 8) * pl.col("Costo interno").fill_null(0)).alias("costo_rate_interno"),
+            
+            # Reemplazamos el nombre sucio por el Nombre_oficial
+            # Si no encuentra mapeo, conserva el original para que no aparezca vacío
+            pl.coalesce([pl.col("nombre_limpio"), pl.col("nombre")]).alias("Nombre")
+        ])
+
+        # Añadimos 'correo_oficial' a la lista de columnas finales para Looker
+        if "correo_oficial" not in consolidated_df.columns:
+             # En caso de que falle el join, evitamos que se rompa el select
+             consolidated_df = consolidated_df.with_columns(pl.lit("").alias("correo_oficial"))
 
         if "Unnamed" in consolidated_df.columns:
             consolidated_df = consolidated_df.rename({"Unnamed": "consecutivo"})
@@ -350,12 +374,27 @@ def run_pipeline():
         export_to_drive(gc, alerts_detail_df, "Detalle Alertas", ALERTS_FOLDER_ID)
 
         # Configuración final de columnas para el consolidado
+        # Mantener el orden original EXACTO y añadir el correo al final
         orden_r = [
-            "archivo_origen", "nombre", "consecutivo", "Fecha", "Día", "Category",
-            "Sub-Category", "Proyecto", "Descripción", "Cantidad de horas", "Mes",
-            "Costo interno",      # Esta es la tasa (precio/hora)
-            "costo_rate_interno"  # Este es el total (horas * tasa)
+            "archivo_origen", 
+            "nombre",           # Ahora contiene el Nombre Oficial (Col J)
+            "consecutivo", 
+            "Fecha", 
+            "Día", 
+            "Category",
+            "Sub-Category", 
+            "Proyecto", 
+            "Descripción", 
+            "Cantidad de horas", 
+            "Mes",
+            "Costo interno", 
+            "costo_rate_interno",
+            "correo_electronico" 
         ]
+        
+        # Verificamos qué columnas existen realmente para evitar errores
+        columnas_finales = [col for col in orden_r if col in consolidated_df.columns]
+        consolidated_df = consolidated_df.select(columnas_finales)
         
         if "Sector_Origen" in consolidated_df.columns:
             orden_r.append("Sector_Origen")
