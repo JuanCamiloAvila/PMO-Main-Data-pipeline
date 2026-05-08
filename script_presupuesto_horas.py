@@ -8,6 +8,7 @@ import traceback
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor
+import unicodedata
 
 # ==============================================================================
 # 1. CONFIGURACIÓN
@@ -67,6 +68,14 @@ def export_to_drive(gc, df: pl.DataFrame, file_name: str, folder_id: str):
 # ==============================================================================
 # 3. EXTRACCIÓN Y RECORTADO DE TABLAS
 # ==============================================================================
+
+def limpiar_nombre(nombre):
+    if not nombre: return ""
+    import unicodedata
+    nombre = str(nombre).lower().strip()
+    return ''.join(c for c in unicodedata.normalize('NFD', nombre)
+                  if unicodedata.category(c) != 'Mn')
+
 def extraer_equipo_interno(raw_rows, file_name):
     if not raw_rows or len(raw_rows) < 2: return None
     
@@ -140,35 +149,58 @@ def extraer_equipo_interno(raw_rows, file_name):
 
 # 🆕 NUEVA FUNCIÓN: Extraer Costos
 def obtener_costos_internos(gc):
-    print("💸 Leyendo archivo de Costos Internos...")
+    print("💸 Leyendo Master de Rates y mapeando Alias...")
     try:
         sh = gc.open_by_key(RATES_FILE_ID)
         ws = sh.worksheet(RATES_SHEET_NAME)
         raw_data = ws.get_all_values()
         
-        if not raw_data or len(raw_data) < 2:
-            return None
-            
+        if not raw_data or len(raw_data) < 2: return None
+        
         headers = raw_data[0]
-        data = raw_data[1:]
-        df_costos = pl.DataFrame(data, schema=headers, orient="row").with_columns(pl.all().cast(pl.Utf8))
+        df_raw = pl.DataFrame(raw_data[1:], schema=headers, orient="row")
         
-        # Búsqueda dinámica de las columnas (ajusta las palabras clave si es necesario)
-        col_nombre = next((c for c in df_costos.columns if "NOMBRE" in c.upper()), None)
-        col_costo = next((c for c in df_costos.columns if "COSTO" in c.upper()), None)
+        columnas_busqueda = ["llave_cruce", "nombre_oficial", "correo_maestro", "tasa"]
+
+        # 1. Nombres Principales (Prioridad 1)
+        df_principal = df_raw.select([
+            pl.col("Nombre").map_elements(limpiar_nombre, return_dtype=pl.Utf8).alias("llave_cruce"),
+            pl.col("Nombre_oficial").alias("nombre_oficial"),
+            pl.col("Correo").alias("correo_maestro"),
+            pl.col("Costo interno").str.replace_all(r"[^\d\.\,]", "").str.replace(",", ".")
+                .cast(pl.Float64, strict=False).fill_null(0.0).alias("tasa")
+        ]).filter(pl.col("llave_cruce") != "").select(columnas_busqueda)
+
+        # 2. Alias (Prioridad 2 - Solo si el alias tiene más de 2 letras)
+        df_alias = df_raw.select([
+            pl.col("Alias").str.split(","), 
+            pl.col("Nombre_oficial").alias("nombre_oficial"),
+            pl.col("Correo").alias("correo_maestro"),
+            pl.col("Costo interno").str.replace_all(r"[^\d\.\,]", "").str.replace(",", ".")
+                .cast(pl.Float64, strict=False).fill_null(0.0).alias("tasa")
+        ]).explode("Alias")
         
-        if not col_nombre or not col_costo:
-            print("⚠️ No se encontraron las columnas de 'Nombre' o 'Costo' en tu archivo de costos.")
-            return None
-            
-        # Limpieza de datos (elimina signos de dólar, espacios, etc., para castear a numérico)
-        df_costos = df_costos.select([
-            pl.col(col_nombre).str.strip_chars().alias("nombre_costo"),
-            pl.col(col_costo).str.replace_all(r"[^\d\.\,]", "").str.replace(",", ".").cast(pl.Float64, strict=False).alias("Costo_interno")
-        ])
-        return df_costos
+        df_alias = df_alias.with_columns(
+            pl.col("Alias").map_elements(limpiar_nombre, return_dtype=pl.Utf8).alias("llave_cruce")
+        ).filter(
+            (pl.col("llave_cruce") != "") & 
+            (pl.col("llave_cruce").str.len_chars() > 2) # 🛡️ Evita que alias como "Ma" crucen con "Mario"
+        ).select(columnas_busqueda)
+
+        # 3. Consolidamos con prioridad: El nombre principal va PRIMERO
+        resultado = pl.concat([df_principal, df_alias])
+        
+        # DEBUG: Imprimir si hay colisiones (opcional pero recomendado)
+        duplicados = resultado.filter(pl.col("llave_cruce").is_duplicated())
+        if not duplicados.is_empty():
+            print("⚠️ Hay nombres o alias idénticos en el Master para personas distintas:")
+            print(duplicados.select(["llave_cruce", "nombre_oficial"]))
+
+        # Mantenemos el PRIMERO que encuentre (por eso df_principal va arriba en el concat)
+        return resultado.unique(subset=["llave_cruce"], keep="first")
+        
     except Exception as e:
-        print(f"🚨 Error obteniendo archivo de costos: {e}")
+        print(f"🚨 Error en Master de Rates: {e}")
         return None
 
 # ==============================================================================
@@ -233,29 +265,33 @@ def run_presupuestos_pipeline():
         df_costos = obtener_costos_internos(gc)
         
         if df_costos is not None:
-            print("🧮 Calculando costos por proyecto...")
-            # Normalizamos los nombres a minúsculas para asegurar que hagan match ("Juan Perez" == "juan perez")
-            master_presupuesto = master_presupuesto.with_columns(pl.col("nombre").str.strip_chars().str.to_lowercase().alias("nombre_join"))
-            df_costos = df_costos.with_columns(pl.col("nombre_costo").str.strip_chars().str.to_lowercase().alias("nombre_join"))
-            
-            # Left Join
-            master_presupuesto = master_presupuesto.join(df_costos, on="nombre_join", how="left")
-            
-            # 🆕 APLICAR LA FÓRMULA DE COSTO
+            # Preparamos el nombre del presupuesto para cruzar
             master_presupuesto = master_presupuesto.with_columns(
-                ((pl.col("Horas_Presupuestadas") / 8) * pl.col("Costo_interno")).alias("Costo_Total_Proyecto")
-            ).drop("nombre_join") # Limpiamos la columna temporal
-        else:
-            # En caso de fallar, creamos columnas vacías para no romper el select final
+                pl.col("nombre").map_elements(limpiar_nombre, return_dtype=pl.Utf8).alias("llave_cruce")
+            )
+            
+            # Join
+            master_presupuesto = master_presupuesto.join(df_costos, on="llave_cruce", how="left")
+            
+            # Asignamos valores finales
             master_presupuesto = master_presupuesto.with_columns([
-                pl.lit(None).alias("Costo_interno"),
-                pl.lit(None).alias("Costo_Total_Proyecto")
+                pl.coalesce([pl.col("nombre_oficial"), pl.col("nombre")]).alias("nombre"),
+                pl.col("tasa").alias("Costo_interno"),
+                ((pl.col("Horas_Presupuestadas") / 8) * pl.col("tasa").fill_null(0)).alias("Costo_Total_Proyecto"),
+                pl.col("correo_maestro").alias("correo_electronico")
             ])
-
-        # Selección final de columnas incluyendo las nuevas métricas
+        
+        # --- SELECCIÓN FINAL (Orden que pediste para Looker) ---
         master_presupuesto = master_presupuesto.select([
-            "ID_Presupuesto", "proyecto_id", "Proyecto", "nombre", 
-            "Horas_Presupuestadas", "Costo_interno", "Costo_Total_Proyecto", "archivo_origen"
+            "ID_Presupuesto", 
+            "proyecto_id", 
+            "Proyecto", 
+            "nombre", 
+            "Horas_Presupuestadas", 
+            "Costo_interno", 
+            "Costo_Total_Proyecto", 
+            "archivo_origen",
+            "correo_electronico" # ✨ Siempre al final
         ])
         
         print(f"\n📤 Exportando a Carpeta DWH: {DWH_FOLDER_ID}")
