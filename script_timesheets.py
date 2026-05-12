@@ -12,17 +12,34 @@ import time
 # ==============================================================================
 # 1. CONFIGURACIÓN DE IDs (Origen y Destino)
 # ==============================================================================
+# Masters (Lectura)
 PROJECTS_URL = "https://docs.google.com/spreadsheets/d/1Rx6e85e0vmLAF2SzOEnCl3k3C6VcYG_VRoBpyHxhqqw/edit?gid=0#gid=0"
 STAFF_RATES_URL = "https://docs.google.com/spreadsheets/d/1PFVuVLKbNWh2TJEG-x2K8-KvHQBuqbRWurAx1PI67FA/edit#gid=1413870694"
-BUSINESS_FOLDER_ID = "1D4CQzLhIlr6iib3bCkV1juGi_Q5GNL1T"
-DEV_FOLDER_ID = "1usvH3yjnXvWHUKLI0ZrFbRJJ3koaSZ1R"
-PARENT_FOLDER_ID = "1fogkf7ANBU5BeFLUmdGmoh_W2vzQKqKZ"
+
+# Destinos (Escritura)
 
 ALERTS_FOLDER_ID = "1QF9d74Svyjli0tb0EU492AtCZj0979oC"
 CONSOLIDATED_FOLDER_ID = "1PdRIlCTiwZDxnjUiYXOpklbqWcJgEt5N"
-DEST_DEV_FOLDER_ID = "1T6M1yt8dXexoeXpqd0-mnCU5VhmeHuKV"
-DEST_BUSINESS_FOLDER_ID = "1p257669lmJv9uc4KVI5leiTlvp_2-eiB"
 
+# Configuración Dinámica de Orígenes, esto reemplazará los IDs sueltos en variables
+SOURCES_CONFIG = {
+    "2026": {
+        "prefix": "Timesheet 2026 -",
+        "folders": [
+            {"id": "1D4CQzLhIlr6iib3bCkV1juGi_Q5GNL1T", "label": "Empresarial"},
+            {"id": "1usvH3yjnXvWHUKLI0ZrFbRJJ3koaSZ1R", "label": "Desarrollo"},
+            {"id": "1fogkf7ANBU5BeFLUmdGmoh_W2vzQKqKZ", "label": "Directorio"}
+        ]
+    },
+    "2025": {
+        "prefix": "Timesheet 2025 -",
+        "folders": [
+            {"id": "1wJfImRXsq7uQUcdS8FjMNcGriVfQXI5d", "label": "Empresarial"},
+            {"id": "1IDfAkcCWCIYKsmTaPGs2AO2b0z68SYNq", "label": "Desarrollo"},
+            {"id": "13J_ZMiCI_o7lCnJ29k_h3Idy7hWChT3C", "label": "Directorio"}
+        ]
+    }
+}
 REVIEW_DATE = "2025-02-28"
 
 # ==============================================================================
@@ -105,7 +122,8 @@ def export_to_drive(gc, df: pl.DataFrame, file_name: str, folder_id: str):
         print(f"⚠️ ATENCIÓN: El reporte '{file_name}' está vacío. No se exportará.")
         return
 
-    if folder_id in [BUSINESS_FOLDER_ID, DEV_FOLDER_ID]:
+    source_ids = [f["id"] for year_data in SOURCES_CONFIG.values() for f in year_data["folders"]]
+    if folder_id in source_ids:
         print(f"🚨 ALERTA DE SEGURIDAD: Intento de escritura en carpeta protegida.")
         return
 
@@ -142,10 +160,14 @@ def process_timesheets(gc, folder_id: str, sector_label: str, name_filter: str =
     files = gc.list_spreadsheet_files(folder_id=folder_id)
     
     if name_filter:
-        files = [f for f in files if f['name'].startswith(name_filter) and "Plantilla" not in f['name']]
-        print(f"  🔍 Filtro aplicado: Encontrados {len(files)} archivos.")
-        for f in files:
-            print(f"     - {f['name']} | ID: {f['id']}")
+        # 🔥 AQUÍ ESTÁ EL FILTRO: Excluimos "plantilla" y "template"
+        files = [
+            f for f in files 
+            if f['name'].startswith(name_filter) 
+            and "plantilla" not in f['name'].lower() 
+            and "template" not in f['name'].lower()
+        ]
+        print(f"  🔍 Filtro aplicado: Encontrados {len(files)} archivos para procesar.")
         
     all_dfs = []  
     if not files:
@@ -160,12 +182,25 @@ def process_timesheets(gc, folder_id: str, sector_label: str, name_filter: str =
                 if df is not None:
                     if "Nombre de Proyecto" in df.columns:
                         df = df.rename({"Nombre de Proyecto": "Proyecto"})
+                    
+                    # 🔥 NUEVO: Contamos cuántas filas realmente tienen datos antes de imprimir
+                    cond_horas = pl.col("Cantidad de horas").is_not_null() & (pl.col("Cantidad de horas").str.strip_chars() != "")
+                    cond_proy = pl.col("Proyecto").is_not_null() & (pl.col("Proyecto").str.strip_chars() != "")
+                    cond_desc = pl.col("Descripción").is_not_null() & (pl.col("Descripción").str.strip_chars() != "")
+                    
+                    registros_validos = len(df.filter(cond_horas | cond_proy | cond_desc))
+                    print(f"     ✅ Leído: '{f['name']}' -> {registros_validos} filas válidas.")
+                    
                     df = df.with_columns([
                         pl.lit(f['name']).alias("archivo_origen"),
                         pl.lit(sector_label).alias("Sector_Origen")
                     ])
                     all_dfs.append(df)
-                break 
+                else:
+                    print(f"     ⚠️ Omitido: '{f['name']}' está vacío o sin datos válidos.")
+                break
+
+
             except Exception as e:
                 if intento < max_intentos_archivo - 1:
                     print(f"    ⚠️ Error de conexión con '{f['name']}'. Reintentando {intento + 1}/{max_intentos_archivo} en 5s...")
@@ -220,7 +255,7 @@ def process_timesheets(gc, folder_id: str, sector_label: str, name_filter: str =
     print(f"    📊 Resumen de limpieza {sector_label}:")
     print(f"      - Registros totales en archivos: {conteo_sucio}")
     print(f"      - Filas vacías eliminadas: {conteo_sucio - registros_finales}")
-    print(f"      - ✅ REGISTROS VÁLIDOS: {registros_finales}")
+    print(f"      - ✅ REGISTROS VÁLIDOS: {registros_finales}\n")
 
     return full_df
 
@@ -237,7 +272,6 @@ def run_pipeline():
         projects_df = safe_read_sheet(projects_sheet)
         
         if projects_df is None:
-            # <-- AÑADIDO: Si falla la lectura base, cancelamos todo con error
             print("❌ CRÍTICO: No se pudo leer el maestro de proyectos.")
             sys.exit(1)
             
@@ -248,70 +282,106 @@ def run_pipeline():
         ])
         valid_projects_list = clean_projects_df.get_column("proyecto").drop_nulls().to_list()
 
-        timesheet_filter = "Timesheet 2026 -"
-        
-        business_df = process_timesheets(gc, BUSINESS_FOLDER_ID, "Empresarial", name_filter=timesheet_filter)
-        dev_df = process_timesheets(gc, DEV_FOLDER_ID, "Desarrollo", name_filter=timesheet_filter)
-        folder_father_df = process_timesheets(gc, PARENT_FOLDER_ID, "Directorio", name_filter=timesheet_filter)
-
-        dfs_to_combine = [df for df in [business_df, dev_df, folder_father_df] if df is not None]
+        # --- PROCESAMIENTO DINÁMICO POR AÑO Y SECTOR ---
+        dfs_to_combine = []
+        for year, config in SOURCES_CONFIG.items():
+            print(f"📅 Procesando año: {year}")
+            for folder in config["folders"]:
+                df = process_timesheets(gc, folder["id"], folder["label"], name_filter=config["prefix"])
+                if df is not None:
+                    df = df.with_columns(pl.lit(year).alias("Año_Fiscal"))
+                    dfs_to_combine.append(df)
 
         if not dfs_to_combine:
-            # <-- AÑADIDO: Error real para GitHub Actions
             print("❌ CRÍTICO: No se encontró ningún dato en ninguna carpeta para consolidar.")
             sys.exit(1)
+            
+        print("\n⚡ Consolidando timesheets...")
+        consolidated_df = pl.concat(dfs_to_combine, how="diagonal")
         
-        print("👥 Importando tasas y mapeo de correos...")
+        print("👥 Importando tasas, mapeo de correos y ALIAS...")
         staff_sheet = gc.open_by_url(STAFF_RATES_URL).worksheet("Rates")
         staff_rates_raw = safe_read_sheet(staff_sheet)
         
-        # Seleccionamos: 
-        # 'Nombre' (Col A) para el cruce.
-        # 'Nombre_oficial' (Col J) para corregir el dato actual.
-        # 'Email' (Col X/final) para la nueva columna.
-        staff_rates_df = staff_rates_raw.select([
-            pl.col("Nombre").alias("nombre_archivo"),
-            pl.col("Nombre_oficial").alias("nombre_limpio"),
-            pl.col("Correo").alias("correo_electronico"), # Esta irá al final
-            pl.col("Costo interno")
-                .cast(pl.Utf8)
-                .str.replace(",", ".")
-                .cast(pl.Float64, strict=False)
-                .fill_null(0.0)
+        # =========================================================
+        # PASO 1: DICCIONARIO DE NOMBRES (Forzado en Python puro)
+        # =========================================================
+        def limpiar_texto(texto):
+            """Reduce a minúsculas, sin tildes y sin NINGÚN caracter especial o espacio."""
+            if not texto: return ""
+            t = str(texto).lower().strip()
+            t = re.sub(r'[áäâà]', 'a', t)
+            t = re.sub(r'[éëêè]', 'e', t)
+            t = re.sub(r'[íïîì]', 'i', t)
+            t = re.sub(r'[óöôò]', 'o', t)
+            t = re.sub(r'[úüûù]', 'u', t)
+            t = re.sub(r'[^a-z0-9]', '', t)
+            return t
+
+        mapping_dict = {}
+        correo_dict = {}
+        rates_data = staff_rates_raw.to_dicts()
+        
+        # Leemos los datos de Rates fila por fila para capturar todos los Alias
+        for row in rates_data:
+            oficial = row.get("Nombre_oficial", "").strip()
+            alias_str = row.get("Alias", "")
+            correo = row.get("Correo", "").strip()
+            
+            if not oficial: continue
+                
+            llave_oficial = limpiar_texto(oficial)
+            if llave_oficial:
+                mapping_dict[llave_oficial] = oficial
+                if correo and oficial not in correo_dict:
+                    correo_dict[oficial] = correo
+                    
+            if alias_str:
+                for a in str(alias_str).split(","):
+                    llave_alias = limpiar_texto(a)
+                    if llave_alias:
+                        mapping_dict[llave_alias] = oficial
+
+        # =========================================================
+        # PASO 2: APLICAR EL MAPEO A LA FUERZA AL CONSOLIDADO
+        # =========================================================
+        # Creamos una llave limpia a partir del nombre original del archivo
+        consolidated_df = consolidated_df.with_columns(
+            pl.col("nombre").map_elements(lambda x: limpiar_texto(x), return_dtype=pl.Utf8).alias("nombre_match_key")
+        )
+
+        # Usamos el diccionario para forzar el cruce exacto
+        consolidated_df = consolidated_df.with_columns(
+            pl.col("nombre_match_key").map_elements(lambda x: mapping_dict.get(x, None), return_dtype=pl.Utf8).alias("Nombre_Oficial_Dict")
+        )
+
+        # Creamos la columna "Nombre" definitiva.
+        consolidated_df = consolidated_df.with_columns([
+            pl.coalesce([pl.col("Nombre_Oficial_Dict"), pl.col("nombre")]).alias("Nombre"),
+            pl.col("Nombre_Oficial_Dict").map_elements(lambda x: correo_dict.get(x, ""), return_dtype=pl.Utf8).alias("correo_electronico")
         ])
 
-        print("\n⚡ Consolidando y normalizando nombres...")
-        consolidated_df = pl.concat(dfs_to_combine, how="diagonal")
+        # =========================================================
+        # PASO 3: DICCIONARIO DE TARIFAS (Por Nombre Oficial y Año)
+        # =========================================================
+        tarifas_df = staff_rates_raw.select([
+            pl.col("Nombre_oficial").alias("nombre_tarifa"),
+            pl.col("Fecha inicio").cast(pl.Utf8).str.extract(r"(20\d{2})").alias("año_tarifa"),
+            pl.col("Costo interno").cast(pl.Utf8).str.replace(",", ".").cast(pl.Float64, strict=False).fill_null(0.0).alias("Costo interno")
+        ])
 
-        # Join con el Master de Rates
+        # Ahora cruzamos usando el "Nombre" ya limpio y el "Año_Fiscal"
         consolidated_df = consolidated_df.join(
-            staff_rates_df, 
-            left_on="nombre", 
-            right_on="nombre_archivo", 
+            tarifas_df,
+            left_on=["Nombre", "Año_Fiscal"],
+            right_on=["nombre_tarifa", "año_tarifa"],
             how="left"
         )
         
-        # 1. Calculamos el costo
-        # 2. Reemplazamos el valor de 'nombre' por el 'nombre_limpio' (Oficial)
+        # --- CÁLCULO DE COSTO FINAL ---
         consolidated_df = consolidated_df.with_columns([
-            ((pl.col("Cantidad de horas") / 8) * pl.col("Costo interno").fill_null(0)).alias("costo_rate_interno"),
-            pl.coalesce([pl.col("nombre_limpio"), pl.col("nombre")]).alias("nombre")
+            ((pl.col("Cantidad de horas") / 8) * pl.col("Costo interno").fill_null(0)).alias("costo_rate_interno")
         ])
-        
-        # --- CÁLCULO DE COSTO Y LIMPIEZA DE IDENTIDAD ---
-        consolidated_df = consolidated_df.with_columns([
-            # Cálculo de costo
-            ((pl.col("Cantidad de horas") / 8) * pl.col("Costo interno").fill_null(0)).alias("costo_rate_interno"),
-            
-            # Reemplazamos el nombre sucio por el Nombre_oficial
-            # Si no encuentra mapeo, conserva el original para que no aparezca vacío
-            pl.coalesce([pl.col("nombre_limpio"), pl.col("nombre")]).alias("Nombre")
-        ])
-
-        # Añadimos 'correo_oficial' a la lista de columnas finales para Looker
-        if "correo_oficial" not in consolidated_df.columns:
-             # En caso de que falle el join, evitamos que se rompa el select
-             consolidated_df = consolidated_df.with_columns(pl.lit("").alias("correo_oficial"))
 
         if "Unnamed" in consolidated_df.columns:
             consolidated_df = consolidated_df.rename({"Unnamed": "consecutivo"})
@@ -344,9 +414,10 @@ def run_pipeline():
         alert_cols = ["alerta_category", "alerta_subcat", "alerta_proyectos", "alerta_horas", "alerta_desc", "alerta_proyecto_nomb"]
         base_alerts_df = base_alerts_df.with_columns(pl.sum_horizontal(alert_cols).alias("suma_alertas"))
 
-        alerts_detail_df = base_alerts_df.filter(pl.col("suma_alertas") > 0).sort("nombre")
+        # 🔥 CORREGIDO: Filtramos y agrupamos por "Nombre" (Mayúscula)
+        alerts_detail_df = base_alerts_df.filter(pl.col("suma_alertas") > 0).sort("Nombre")
         
-        alerts_summary_df = base_alerts_df.group_by("nombre").agg([
+        alerts_summary_df = base_alerts_df.group_by("Nombre").agg([
             *[pl.col(c).sum() for c in alert_cols],
             pl.col("Fecha").max().alias("max_fecha")
         ]).with_columns([
@@ -357,13 +428,13 @@ def run_pipeline():
         ).filter(pl.col("suma_alertas") >= 1).sort("suma_alertas", descending=True)
         
         alerts_summary_df = alerts_summary_df.select([
-            "nombre", "alerta_category", "alerta_subcat", "alerta_proyectos",
+            "Nombre", "alerta_category", "alerta_subcat", "alerta_proyectos",
             "alerta_horas", "alerta_desc", "alerta_fecha", "alerta_proyecto_nomb",
             "max_fecha", "suma_alertas"
         ])
 
         alerts_detail_df = alerts_detail_df.select([
-            "archivo_origen", "nombre", "consecutivo", "Fecha", "Día", "Category",
+            "archivo_origen", "Nombre", "consecutivo", "Fecha", "Día", "Category",
             "Sub-Category", "Proyecto", "Descripción", "Cantidad de horas", "Mes",
             "alerta_category", "alerta_subcat", "alerta_proyectos", "alerta_horas",
             "alerta_desc", "alerta_proyecto_nomb", "suma_alertas",
@@ -373,11 +444,10 @@ def run_pipeline():
         export_to_drive(gc, alerts_summary_df, "Resumen Alertas", ALERTS_FOLDER_ID)
         export_to_drive(gc, alerts_detail_df, "Detalle Alertas", ALERTS_FOLDER_ID)
 
-        # Configuración final de columnas para el consolidado
-        # Mantener el orden original EXACTO y añadir el correo al final
+        # 🔥 CORREGIDO: Exportamos "Nombre" (Mayúscula)
         orden_r = [
             "archivo_origen", 
-            "nombre",           # Ahora contiene el Nombre Oficial (Col J)
+            "Nombre",           
             "consecutivo", 
             "Fecha", 
             "Día", 
@@ -389,12 +459,9 @@ def run_pipeline():
             "Mes",
             "Costo interno", 
             "costo_rate_interno",
-            "correo_electronico" 
+            "correo_electronico",
+            "Año_Fiscal"
         ]
-        
-        # Verificamos qué columnas existen realmente para evitar errores
-        columnas_finales = [col for col in orden_r if col in consolidated_df.columns]
-        consolidated_df = consolidated_df.select(columnas_finales)
         
         if "Sector_Origen" in consolidated_df.columns:
             orden_r.append("Sector_Origen")
@@ -414,7 +481,6 @@ def run_pipeline():
         return consolidated_df
 
     except Exception as e:
-        # Bloque de error único y limpio
         print("\n❌ El pipeline falló. Detalle del error:")
         traceback.print_exc()
         sys.exit(1)
