@@ -213,17 +213,37 @@ def limpiar_dataframe_pmo(raw_rows, file_name, tipo, traductor):
         if total_inicial > filas_finales:
             print(f"   🔎 [{tipo}] {file_name}: {total_inicial} reales extraídas -> {filas_finales} válidas.")
 
-        # --- 7. SELECCIÓN FINAL ---
+        # --- 7. SELECCIÓN FINAL Y EXTRACCIÓN POR DÍGITO ---
         cols_finales = COLUMNAS_INGRESOS if tipo == "Ingreso" else COLUMNAS_GASTOS
         presentes = [c for c in cols_finales if c in df.columns]
         
         if df.is_empty() or not presentes: return None
 
-        return df.select(presentes).with_columns([pl.lit(tipo).alias("Tipo_Movimiento"), pl.lit(file_name).alias("archivo_origen")])
-    except Exception as e: 
+        # 1. Quitamos "NUEVO" en cualquier combinación
+        nombre_temp = file_name.replace("NUEVO", "").replace("nuevo", "").replace("Nuevo", "").strip()
+
+        # 2. Buscamos el índice del primer dígito numérico
+        indice_inicio = 0
+        for i, char in enumerate(nombre_temp):
+            if char.isdigit():
+                indice_inicio = i
+                break
+        
+        # 3. Extraemos desde el primer dígito y quitamos la extensión del archivo
+        nombre_proyecto_estandar = nombre_temp[indice_inicio:].split(".")[0].strip()
+
+        return df.select(presentes).with_columns([
+            pl.lit(tipo).alias("Tipo_Movimiento"), 
+            pl.lit(file_name).alias("archivo_origen"),
+            pl.lit(nombre_proyecto_estandar).alias("Proyecto") 
+        ])
+
+    # ESTE ES EL BLOQUE QUE FALTABA
+    except Exception as e:
         print(f"❌ Error estructurando {file_name} ({tipo}): {e}")
         return None
 
+        
 # ==============================================================================
 # 3. EJECUCIÓN
 # ==============================================================================
