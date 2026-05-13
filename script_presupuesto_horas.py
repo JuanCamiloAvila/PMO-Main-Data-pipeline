@@ -9,6 +9,7 @@ import time
 import threading
 from concurrent.futures import ThreadPoolExecutor
 import unicodedata
+import functools
 
 # ==============================================================================
 # 1. CONFIGURACIÓN
@@ -18,22 +19,66 @@ TEST_FILE_IDS = [
     "1C9B3hrNI9heC7xf37bCC2KifDGzhhSC7at46kyg6y6k"
 ]
 
-DWH_FOLDER_ID = "1_8cyY32pxRXU3Au0OZOor1wNN7uXO-wr"
+SOURCES_CONFIG = {
+    "2026": {
+        "folders": [
+            {"id": "1EbqyjMb841artvPenWBuu2PcJuOc4w_Y", "label": "Estratégico"},
+            {"id": "15p3qq7KtFDgDqZKh1vFCkKrczDkNIY7k", "label": "Empresarial"},
+            {"id": "1hA9Sb6nYY9vuaxNnrTG7tYginYhDVX-X", "label": "Desarrollo"},
+            {"id": "1dLYU7aYYkPZKN012vtmvj15a01gWsu1_", "label": "Directorio"}
+        ]
+    },
+    "2025": {
+        "folders": [
+            {"id": "1m-LdkuaKc4j-EVfMCLF6gpr_IUnFzaUF", "label": "Solicitudes proyectos pasados"},
+            {"id": "1Z-cWyN3qjCMRAWG1SCsJh2MD7s-7nk4mS", "label": "Proyectos Estratégicos"},
+            {"id": "1M9xSJl-7riGk-IUfg7bH1YirMtRkdFvB", "label": "Empresarial"},
+            {"id": "1nuxC_fhk6arz4N1mVCPUWe-3bkQW3_Yp", "label": "Desarrollo"},
+            {"id": "1nVhpyaW0d3uFQdF7t6_qgmTJpkBmL8xr", "label": "Directorio"}
+        ]
+    }
+}
 
-# 🆕 VARIABLES PARA EL ARCHIVO DE COSTOS (⚠️ REEMPLAZA ESTOS VALORES)
+DWH_FOLDER_ID = "1_8cyY32pxRXU3Au0OZOor1wNN7uXO-wr"
 RATES_FILE_ID = "1PFVuVLKbNWh2TJEG-x2K8-KvHQBuqbRWurAx1PI67FA" 
-RATES_SHEET_NAME = "Rates" # Nombre exacto de la pestaña donde están los costos
+RATES_SHEET_NAME = "Rates"
 
 # ==============================================================================
 # 2. AUTENTICACIÓN Y EXPORTACIÓN
 # ==============================================================================
+def api_retry(max_retries=6):
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            for attempt in range(max_retries):
+                try:
+                    return func(*args, **kwargs)
+                except gspread.exceptions.APIError as e:
+                    if any(code in str(e) for code in ['429', '500', '502', '503']):
+                        wait_time = (attempt + 1) * 20
+                        print(f"    ⚠️ Límite de cuota o red. Reintentando en {wait_time}s... ({attempt+1}/{max_retries})")
+                        time.sleep(wait_time)
+                    else:
+                        raise e
+            raise Exception(f"❌ Falló tras {max_retries} reintentos en: {func.__name__}")
+        return wrapper
+    return decorator
+
+@api_retry()
 def get_gspread_client():
     scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
     token_str = os.environ.get('GOOGLE_OAUTH_TOKEN')
+    
     if token_str:
-        return gspread.authorize(Credentials.from_authorized_user_info(json.loads(token_str), scopes))
-    return gspread.authorize(Credentials.from_authorized_user_file('token.json', scopes))
-
+        print("🔑 Modo Nube: Usando token de entorno...")
+        creds = Credentials.from_authorized_user_info(json.loads(token_str), scopes)
+    else:
+        print("🔑 Modo Local: Usando archivo token.json...")
+        creds = Credentials.from_authorized_user_file('token.json', scopes)
+        
+    return gspread.authorize(creds)
+        
+@api_retry()
 def export_to_drive(gc, df: pl.DataFrame, file_name: str, folder_id: str):
     if df is None or df.is_empty(): return
     datos_exportar = [list(df.columns)]
@@ -43,27 +88,20 @@ def export_to_drive(gc, df: pl.DataFrame, file_name: str, folder_id: str):
     files = gc.list_spreadsheet_files(folder_id=folder_id)
     file_id = next((f['id'] for f in files if f['name'] == file_name), None)
     
-    intentos, exito = 0, False
-    while intentos < 3 and not exito:
-        try:
-            if file_id: sh = gc.open_by_key(file_id)
-            else: sh = gc.create(file_name, folder_id=folder_id)
-                
-            try: ws = sh.worksheet("Datos")
-            except gspread.exceptions.WorksheetNotFound:
-                ws = sh.sheet1
-                ws.update_title("Datos")
-                
-            ws.clear()
-            ws.update(datos_exportar, value_input_option="USER_ENTERED")
-            exito = True
-            print(f"      ✅ Guardado en DWH: {file_name}")
-            time.sleep(2)
-        except gspread.exceptions.APIError as e:
-            if "429" in str(e):
-                intentos += 1
-                time.sleep(20 * intentos)
-            else: raise e
+    if file_id: 
+        sh = gc.open_by_key(file_id)
+    else: 
+        sh = gc.create(file_name, folder_id=folder_id)
+            
+    try: 
+        ws = sh.worksheet("Datos")
+    except gspread.exceptions.WorksheetNotFound:
+        ws = sh.sheet1
+        ws.update_title("Datos")
+            
+    ws.clear()
+    ws.update(datos_exportar, value_input_option="USER_ENTERED")
+    print(f"      ✅ Guardado en DWH: {file_name}")
 
 # ==============================================================================
 # 3. EXTRACCIÓN Y RECORTADO DE TABLAS
@@ -124,8 +162,9 @@ def extraer_equipo_interno(raw_rows, file_name):
     
     col_nombre = next((c for c in df.columns if "NOMBRE COMPLETO" in c.upper()), None)
     col_horas = next((c for c in df.columns if "CANTIDAD DE HORAS" in c.upper() or "HORAS PRESUPUESTADAS" in c.upper()), None)
+    col_rate = next((c for c in df.columns if "RATE" in c.upper()), None)
     
-    if not col_nombre or not col_horas: return None
+    if not col_nombre or not col_horas or not col_rate: return None
 
     df = df.filter(
         (pl.col(col_nombre).str.strip_chars() != "") & 
@@ -134,7 +173,9 @@ def extraer_equipo_interno(raw_rows, file_name):
     
     df = df.with_columns([
         pl.col(col_nombre).alias("nombre"),
-        pl.col(col_horas).str.replace(",", ".").cast(pl.Float64, strict=False).alias("Horas_Presupuestadas")
+        pl.col(col_horas).str.replace(",", ".").cast(pl.Float64, strict=False).alias("Horas_Presupuestadas"),
+        pl.col(col_rate).str.replace_all(r"[^\d\.\,]", "").str.replace(",", ".")
+            .cast(pl.Float64, strict=False).fill_null(0.0).alias("Costo_interno")
     ])
     
     df = df.filter(pl.col("Horas_Presupuestadas").is_not_null())
@@ -145,11 +186,11 @@ def extraer_equipo_interno(raw_rows, file_name):
         pl.lit(nombre_archivo_limpio).alias("Proyecto")
     ])
 
-    return df.select(["archivo_origen", "Proyecto", "nombre", "Horas_Presupuestadas"])
+    return df.select(["archivo_origen", "Proyecto", "nombre", "Horas_Presupuestadas", "Costo_interno"])
 
-# 🆕 NUEVA FUNCIÓN: Extraer Costos
-def obtener_costos_internos(gc):
-    print("💸 Leyendo Master de Rates y mapeando Alias...")
+@api_retry()
+def obtener_directorio_correos(gc):
+    print("📇 Leyendo Master de Rates solo como Directorio (Nombres y Correos)...")
     try:
         sh = gc.open_by_key(RATES_FILE_ID)
         ws = sh.worksheet(RATES_SHEET_NAME)
@@ -160,43 +201,26 @@ def obtener_costos_internos(gc):
         headers = raw_data[0]
         df_raw = pl.DataFrame(raw_data[1:], schema=headers, orient="row")
         
-        columnas_busqueda = ["llave_cruce", "nombre_oficial", "correo_maestro", "tasa"]
+        columnas_busqueda = ["llave_cruce", "nombre_oficial", "correo_maestro"]
 
-        # 1. Nombres Principales (Prioridad 1)
         df_principal = df_raw.select([
             pl.col("Nombre").map_elements(limpiar_nombre, return_dtype=pl.Utf8).alias("llave_cruce"),
             pl.col("Nombre_oficial").alias("nombre_oficial"),
-            pl.col("Correo").alias("correo_maestro"),
-            pl.col("Costo interno").str.replace_all(r"[^\d\.\,]", "").str.replace(",", ".")
-                .cast(pl.Float64, strict=False).fill_null(0.0).alias("tasa")
+            pl.col("Correo").alias("correo_maestro")
         ]).filter(pl.col("llave_cruce") != "").select(columnas_busqueda)
 
-        # 2. Alias (Prioridad 2 - Solo si el alias tiene más de 2 letras)
         df_alias = df_raw.select([
             pl.col("Alias").str.split(","), 
             pl.col("Nombre_oficial").alias("nombre_oficial"),
-            pl.col("Correo").alias("correo_maestro"),
-            pl.col("Costo interno").str.replace_all(r"[^\d\.\,]", "").str.replace(",", ".")
-                .cast(pl.Float64, strict=False).fill_null(0.0).alias("tasa")
-        ]).explode("Alias")
-        
-        df_alias = df_alias.with_columns(
+            pl.col("Correo").alias("correo_maestro")
+        ]).explode("Alias").with_columns(
             pl.col("Alias").map_elements(limpiar_nombre, return_dtype=pl.Utf8).alias("llave_cruce")
         ).filter(
             (pl.col("llave_cruce") != "") & 
-            (pl.col("llave_cruce").str.len_chars() > 2) # 🛡️ Evita que alias como "Ma" crucen con "Mario"
+            (pl.col("llave_cruce").str.len_chars() > 2) 
         ).select(columnas_busqueda)
 
-        # 3. Consolidamos con prioridad: El nombre principal va PRIMERO
         resultado = pl.concat([df_principal, df_alias])
-        
-        # DEBUG: Imprimir si hay colisiones (opcional pero recomendado)
-        duplicados = resultado.filter(pl.col("llave_cruce").is_duplicated())
-        if not duplicados.is_empty():
-            print("⚠️ Hay nombres o alias idénticos en el Master para personas distintas:")
-            print(duplicados.select(["llave_cruce", "nombre_oficial"]))
-
-        # Mantenemos el PRIMERO que encuentre (por eso df_principal va arriba en el concat)
         return resultado.unique(subset=["llave_cruce"], keep="first")
         
     except Exception as e:
@@ -206,43 +230,114 @@ def obtener_costos_internos(gc):
 # ==============================================================================
 # 4. PIPELINE PRINCIPAL 
 # ==============================================================================
+
+@api_retry()
+def abrir_archivo_protegido(gc, file_id):
+    return gc.open_by_key(file_id)
+
+@api_retry()
+def listar_archivos_protegido(gc, folder_id):
+    return gc.list_spreadsheet_files(folder_id=folder_id)
+
+@api_retry(max_retries=6)
+def leer_valores_pestana(sh, nombre_pestana):
+    try:
+        ws = sh.worksheet(nombre_pestana)
+        return ws.get('A1:Z300') 
+    except gspread.exceptions.WorksheetNotFound:
+        return None
+
 def run_presupuestos_pipeline():
     print("🚀 Iniciando Extracción de Horas Presupuestadas...")
     gc = get_gspread_client()
     
-    total_archivos = len(TEST_FILE_IDS)
+    archivos_a_procesar = []
+    archivos_fallidos = []
+
+    print("📁 Escaneando carpetas de Google Drive...")
+    for anio, config in SOURCES_CONFIG.items():
+        for carpeta in config["folders"]:
+            try:
+                files_in_folder = listar_archivos_protegido(gc, carpeta["id"])
+                
+                archivos_en_esta_carpeta = []
+                for f in files_in_folder:
+                    nombre = f.get('name', '')
+                    if nombre.startswith("Productividad:") and "Template" not in nombre and "-" in nombre:
+                        archivos_en_esta_carpeta.append({
+                            "id": f['id'],
+                            "anio": anio
+                        })
+                
+                archivos_a_procesar.extend(archivos_en_esta_carpeta)
+                print(f"   ✅ {anio} - {carpeta['label']}: {len(archivos_en_esta_carpeta)} archivos válidos encontrados.")
+            except Exception as e:
+                print(f"   🚨 Error accediendo a carpeta {carpeta['label']} ({anio}): {e}")
+
+    archivos_unicos = {obj["id"]: obj for obj in archivos_a_procesar}
+    archivos_a_procesar = list(archivos_unicos.values())
+    
+    total_archivos = len(archivos_a_procesar)
+    if total_archivos == 0:
+        print("❌ No se encontraron archivos válidos en las carpetas configuradas.")
+        return
+
     procesados = 0
     contador_lock = threading.Lock()
     lista_dfs = []
 
-    def worker(file_id):
+    def worker(file_info):
         nonlocal procesados
+        time.sleep(2) 
+        
+        file_id = file_info["id"]
+        anio_archivo = file_info["anio"]
+        
         res = None
+        file_name = f"ID Desconocido: {file_id}" 
+        
         try:
-            sh = gc.open_by_key(file_id)
-            file_name = sh.title
-            try:
-                ws = sh.worksheet("Equipo")
-                raw_data = ws.get_all_values()
-                res = extraer_equipo_interno(raw_data, file_name)
-            except gspread.exceptions.WorksheetNotFound:
-                pass 
+            sh = abrir_archivo_protegido(gc, file_id)
+            if sh:
+                file_name = sh.title
+                raw_data = leer_valores_pestana(sh, "Equipo")
                 
+                if raw_data is not None:
+                    res = extraer_equipo_interno(raw_data, file_name)
+                    
+                with contador_lock:
+                    procesados += 1
+                    if raw_data is None:
+                        print(f"[{procesados}/{total_archivos}] [📅 {anio_archivo}] ⏭️ Ignorado (Sin pestaña 'Equipo'): {file_name}")
+                    elif res is not None:
+                        print(f"[{procesados}/{total_archivos}] [📅 {anio_archivo}] ✅ Extraído: {file_name}")
+                    else:
+                        print(f"[{procesados}/{total_archivos}] [📅 {anio_archivo}] ⚠️ Extraído pero sin datos válidos (Falta columna Rate o Horas): {file_name}")
+                        
+        except Exception as e:
             with contador_lock:
                 procesados += 1
-                if res is not None:
-                    print(f"[{procesados}/{total_archivos}] ✅ Extraído: {file_name}")
-                else:
-                    print(f"[{procesados}/{total_archivos}] ⏭️ Ignorado (Sin datos válidos): {file_name}")
-        except Exception as e:
-            print(f"🚨 Error abriendo archivo ID {file_id}: {e}")
+                print(f"[{procesados}/{total_archivos}] [📅 {anio_archivo}] ❌ Error definitivo: {file_name}")
+                archivos_fallidos.append({
+                    "anio": anio_archivo,
+                    "nombre": file_name,
+                    "id": file_id
+                })
         return res
 
-    with ThreadPoolExecutor(max_workers=3) as executor:
-        resultados = list(executor.map(worker, TEST_FILE_IDS))
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        resultados = list(executor.map(worker, archivos_a_procesar))
 
     for r in resultados:
         if r is not None: lista_dfs.append(r)
+
+    if archivos_fallidos:
+        print("\n" + "="*70)
+        print("🚨 REPORTE DE ARCHIVOS NO ESCANEADOS (FALLARON TRAS TODOS LOS REINTENTOS)")
+        print("="*70)
+        for f in archivos_fallidos:
+            print(f"📅 {f['anio']} | 📄 {f['nombre']} | 🔗 ID: {f['id']}")
+        print("="*70 + "\n")
 
     if lista_dfs:
         print("\n⚡ Consolidando tabla de Horas Presupuestadas...")
@@ -261,27 +356,31 @@ def run_presupuestos_pipeline():
         
         master_presupuesto = master_presupuesto.with_row_index(name="ID_Presupuesto", offset=1)
         
-        # 🆕 OBTENER COSTOS Y HACER EL CRUCE (JOIN)
-        df_costos = obtener_costos_internos(gc)
+        df_directorio = obtener_directorio_correos(gc)
         
-        if df_costos is not None:
-            # Preparamos el nombre del presupuesto para cruzar
+        if df_directorio is not None:
             master_presupuesto = master_presupuesto.with_columns(
                 pl.col("nombre").map_elements(limpiar_nombre, return_dtype=pl.Utf8).alias("llave_cruce")
             )
             
-            # Join
-            master_presupuesto = master_presupuesto.join(df_costos, on="llave_cruce", how="left")
+            master_presupuesto = master_presupuesto.join(df_directorio, on="llave_cruce", how="left")
             
-            # Asignamos valores finales
             master_presupuesto = master_presupuesto.with_columns([
-                pl.coalesce([pl.col("nombre_oficial"), pl.col("nombre")]).alias("nombre"),
-                pl.col("tasa").alias("Costo_interno"),
-                ((pl.col("Horas_Presupuestadas") / 8) * pl.col("tasa").fill_null(0)).alias("Costo_Total_Proyecto"),
+                # ✨ CORRECCIÓN AQUÍ: Si el Master no lo tiene o devuelve un campo vacío, conserva el original
+                pl.when(pl.col("nombre_oficial").is_null() | (pl.col("nombre_oficial") == ""))
+                .then(pl.col("nombre"))
+                .otherwise(pl.col("nombre_oficial"))
+                .alias("nombre"),
+                
+                ((pl.col("Horas_Presupuestadas") / 8) * pl.col("Costo_interno").fill_null(0)).alias("Costo_Total_Proyecto"),
                 pl.col("correo_maestro").alias("correo_electronico")
             ])
+        else:
+            master_presupuesto = master_presupuesto.with_columns([
+                ((pl.col("Horas_Presupuestadas") / 8) * pl.col("Costo_interno").fill_null(0)).alias("Costo_Total_Proyecto"),
+                pl.lit(None).alias("correo_electronico")
+            ])
         
-        # --- SELECCIÓN FINAL (Orden que pediste para Looker) ---
         master_presupuesto = master_presupuesto.select([
             "ID_Presupuesto", 
             "proyecto_id", 
@@ -291,7 +390,7 @@ def run_presupuestos_pipeline():
             "Costo_interno", 
             "Costo_Total_Proyecto", 
             "archivo_origen",
-            "correo_electronico" # ✨ Siempre al final
+            "correo_electronico" 
         ])
         
         print(f"\n📤 Exportando a Carpeta DWH: {DWH_FOLDER_ID}")
@@ -299,7 +398,7 @@ def run_presupuestos_pipeline():
         
         print(f"\n✅ Pipeline Finalizado. Revisa tu archivo 'Fact_Presupuesto_Horas' en Drive.")
     else:
-        print("❌ No se encontraron datos válidos en estos dos archivos de prueba.")
+        print("❌ No se encontraron datos válidos.")
 
 if __name__ == "__main__":
     run_presupuestos_pipeline()
