@@ -116,6 +116,11 @@ def get_sheet_data_safely(gc, file_id):
     return safe_read_sheet(sheet, range_name="A2:I")
 
 @api_retry()
+def get_master_sheet_safely(gc, url, sheet_name):
+    """Abre los archivos maestros usando el escudo anti-bloqueos (reintentos automáticos)."""
+    return gc.open_by_url(url).worksheet(sheet_name)
+
+@api_retry()
 def export_to_drive(gc, df: pl.DataFrame, file_name: str, folder_id: str):
     if df.is_empty():
         # <-- AÑADIDO: Alerta visible
@@ -264,11 +269,16 @@ def process_timesheets(gc, folder_id: str, sector_label: str, name_filter: str =
 # ==============================================================================
 def run_pipeline():
     print("🚀 Iniciando Pipeline PMO...\n")
+    # Darle un respiro a la API de Google por si GitHub Actions viene de correr otro script
+    print("⏳ Pausa de seguridad de 10s para limpiar cuota de API...")
+    time.sleep(10)
+    
     try:
         gc = get_gspread_client()
         
         print("📚 Importando maestro de proyectos...")
-        projects_sheet = gc.open_by_url(PROJECTS_URL).worksheet("Proyectos")
+        # USAMOS LA NUEVA FUNCIÓN SEGURA AQUÍ:
+        projects_sheet = get_master_sheet_safely(gc, PROJECTS_URL, "Proyectos")
         projects_df = safe_read_sheet(projects_sheet)
         
         if projects_df is None:
@@ -299,8 +309,9 @@ def run_pipeline():
         print("\n⚡ Consolidando timesheets...")
         consolidated_df = pl.concat(dfs_to_combine, how="diagonal")
         
-        print("👥 Importando tasas, mapeo de correos y ALIAS...")
-        staff_sheet = gc.open_by_url(STAFF_RATES_URL).worksheet("Rates")
+        print("👥 Importando tasas y mapeo de correos...")
+        # USAMOS LA NUEVA FUNCIÓN SEGURA AQUÍ TAMBIÉN:
+        staff_sheet = get_master_sheet_safely(gc, STAFF_RATES_URL, "Rates")
         staff_rates_raw = safe_read_sheet(staff_sheet)
         
         # =========================================================
