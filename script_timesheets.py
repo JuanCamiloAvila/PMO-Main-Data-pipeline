@@ -121,6 +121,11 @@ def get_master_sheet_safely(gc, url, sheet_name):
     return gc.open_by_url(url).worksheet(sheet_name)
 
 @api_retry()
+def list_files_safely(gc, folder_id):
+    """Lista los archivos de una carpeta usando el escudo de reintentos."""
+    return gc.list_spreadsheet_files(folder_id=folder_id)
+
+@api_retry()
 def export_to_drive(gc, df: pl.DataFrame, file_name: str, folder_id: str):
     if df.is_empty():
         # <-- AÑADIDO: Alerta visible
@@ -162,10 +167,11 @@ def export_to_drive(gc, df: pl.DataFrame, file_name: str, folder_id: str):
 
 def process_timesheets(gc, folder_id: str, sector_label: str, name_filter: str = None) -> pl.DataFrame:
     print(f"\n📂 Buscando timesheets en carpeta: {sector_label}...")
-    files = gc.list_spreadsheet_files(folder_id=folder_id)
+    
+    # 🔥 APLICAMOS EL ESCUDO AL LISTADO DE ARCHIVOS (Evita el Error 500)
+    files = list_files_safely(gc, folder_id)
     
     if name_filter:
-        # 🔥 AQUÍ ESTÁ EL FILTRO: Excluimos "plantilla" y "template"
         files = [
             f for f in files 
             if f['name'].startswith(name_filter) 
@@ -188,7 +194,6 @@ def process_timesheets(gc, folder_id: str, sector_label: str, name_filter: str =
                     if "Nombre de Proyecto" in df.columns:
                         df = df.rename({"Nombre de Proyecto": "Proyecto"})
                     
-                    # 🔥 NUEVO: Contamos cuántas filas realmente tienen datos antes de imprimir
                     cond_horas = pl.col("Cantidad de horas").is_not_null() & (pl.col("Cantidad de horas").str.strip_chars() != "")
                     cond_proy = pl.col("Proyecto").is_not_null() & (pl.col("Proyecto").str.strip_chars() != "")
                     cond_desc = pl.col("Descripción").is_not_null() & (pl.col("Descripción").str.strip_chars() != "")
@@ -204,7 +209,6 @@ def process_timesheets(gc, folder_id: str, sector_label: str, name_filter: str =
                 else:
                     print(f"     ⚠️ Omitido: '{f['name']}' está vacío o sin datos válidos.")
                 break
-
 
             except Exception as e:
                 if intento < max_intentos_archivo - 1:
@@ -223,30 +227,50 @@ def process_timesheets(gc, folder_id: str, sector_label: str, name_filter: str =
         full_df = full_df.rename({"...1": "consecutivo"})
         
     date_formats = ["%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%Y-%m-%d %H:%M:%S", "%d-%m-%Y", "%d.%m.%Y", "%d/%m/%y"]
-    mapa_meses = {"1": "ene", "2": "feb", "3": "mar", "4": "abr", "5": "may", "6": "jun", "7": "jul", "8": "ago", "9": "sep", "10": "oct", "11": "nov", "12": "dic"}
+    # 🔥 DICCIONARIO INVERSO: Para convertir letras en números de mes
+    mapa_meses_inv = {"ene": 1, "feb": 2, "mar": 3, "abr": 4, "may": 5, "jun": 6, "jul": 7, "ago": 8, "sep": 9, "oct": 10, "nov": 11, "dic": 12}
 
     full_df = full_df.with_columns([
         pl.col("archivo_origen").str.split("-").list.last().str.strip_chars().alias("nombre"),
         pl.col("Proyecto").str.strip_chars(),
         pl.col("Proyecto").str.extract(r"^([\d-]+)", 1).str.replace_all("-", "_").alias("proyecto_id"),
         pl.col("Cantidad de horas").cast(pl.Utf8).str.replace(",", ".").cast(pl.Float64, strict=False),
+        
+        # 1. Buscamos fecha en la columna Fecha
         pl.coalesce([
             pl.col("Fecha").cast(pl.Utf8).str.strip_chars().str.replace_all(r"\s+", "").str.strptime(pl.Date, format=fmt, strict=False) 
             for fmt in date_formats
-        ]).alias("Fecha_Temporal")
+        ]).alias("Fecha_Temporal"),
+        
+        # 2. Buscamos si "Mes" tiene una fecha escondida (ej. 1/10/2025)
+        pl.coalesce([
+            pl.col("Mes").cast(pl.Utf8).str.strip_chars().str.strptime(pl.Date, format=fmt, strict=False) 
+            for fmt in date_formats
+        ]).alias("Mes_Oculto")
     ])
 
     full_df = full_df.with_columns([
+        # 🔥 TRANSFORMACIÓN DEFINITIVA DE MES A FECHA YYYY-MM-01
         pl.when(pl.col("Fecha_Temporal").is_not_null())
-        .then(pl.col("Fecha_Temporal").dt.month().cast(pl.Utf8).replace(mapa_meses) + "/" + pl.col("Fecha_Temporal").dt.year().cast(pl.Utf8))
-        .otherwise(pl.col("Mes"))
-        .alias("Mes"),
+        .then(pl.date(pl.col("Fecha_Temporal").dt.year(), pl.col("Fecha_Temporal").dt.month(), 1))
+        
+        .when(pl.col("Mes_Oculto").is_not_null())
+        .then(pl.date(pl.col("Mes_Oculto").dt.year(), pl.col("Mes_Oculto").dt.month(), 1))
+        
+        .otherwise(
+            # Si es texto (ej: "oct/2025"), sacamos el año y las primeras 3 letras del mes
+            pl.date(
+                pl.col("Mes").cast(pl.Utf8).str.extract(r"(20\d{2})").cast(pl.Int32), # Año
+                pl.col("Mes").cast(pl.Utf8).str.to_lowercase().str.slice(0, 3).replace(mapa_meses_inv, return_dtype=pl.Int32), # Mes en número
+                1 # Día 1
+            )
+        ).dt.strftime("%Y-%m-%d").alias("Mes"), # Lo convertimos al formato que Looker ama
 
         pl.when(pl.col("Fecha_Temporal").is_not_null())
         .then(pl.col("Fecha_Temporal").dt.strftime("%Y-%m-%d"))
         .otherwise(pl.col("Fecha"))
         .alias("Fecha")
-    ]).drop("Fecha_Temporal")
+    ]).drop(["Fecha_Temporal", "Mes_Oculto"])
 
     conteo_sucio = len(full_df)
     full_df = full_df.filter(
