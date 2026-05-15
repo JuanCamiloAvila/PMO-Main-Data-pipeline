@@ -250,7 +250,7 @@ def process_timesheets(gc, folder_id: str, sector_label: str, name_filter: str =
     ])
 
     full_df = full_df.with_columns([
-        # 🔥 TRANSFORMACIÓN DEFINITIVA DE MES A FECHA YYYY-MM-01
+        # 🔥 TRANSFORMACIÓN DEFINITIVA DE MES A FECHA YYYY-MM-01 (A PRUEBA DE VACÍOS)
         pl.when(pl.col("Fecha_Temporal").is_not_null())
         .then(pl.date(pl.col("Fecha_Temporal").dt.year(), pl.col("Fecha_Temporal").dt.month(), 1))
         
@@ -258,13 +258,14 @@ def process_timesheets(gc, folder_id: str, sector_label: str, name_filter: str =
         .then(pl.date(pl.col("Mes_Oculto").dt.year(), pl.col("Mes_Oculto").dt.month(), 1))
         
         .otherwise(
-            # Si es texto (ej: "oct/2025"), sacamos el año y las primeras 3 letras del mes
+            # Si es texto, sacamos el año y las primeras 3 letras del mes
             pl.date(
-                pl.col("Mes").cast(pl.Utf8).str.extract(r"(20\d{2})").cast(pl.Int32), # Año
-                pl.col("Mes").cast(pl.Utf8).str.to_lowercase().str.slice(0, 3).replace(mapa_meses_inv, return_dtype=pl.Int32), # Mes en número
-                1 # Día 1
+                pl.col("Mes").cast(pl.Utf8).str.extract(r"(20\d{2})").cast(pl.Int32, strict=False), # Añadido strict=False para no fallar con vacíos
+                # Usamos replace_strict y default=None para que los vacíos ("") se conviertan en nulos sin romper el código
+                pl.col("Mes").cast(pl.Utf8).str.to_lowercase().str.slice(0, 3).replace_strict(mapa_meses_inv, default=None, return_dtype=pl.Int32), 
+                1 
             )
-        ).dt.strftime("%Y-%m-%d").alias("Mes"), # Lo convertimos al formato que Looker ama
+        ).dt.strftime("%Y-%m-%d").alias("Mes"),
 
         pl.when(pl.col("Fecha_Temporal").is_not_null())
         .then(pl.col("Fecha_Temporal").dt.strftime("%Y-%m-%d"))
