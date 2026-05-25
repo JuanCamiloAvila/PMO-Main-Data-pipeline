@@ -310,7 +310,11 @@ def run_presupuestos_pipeline():
                     if raw_data is None:
                         print(f"[{procesados}/{total_archivos}] [📅 {anio_archivo}] ⏭️ Ignorado (Sin pestaña 'Equipo'): {file_name}")
                     elif res is not None:
-                        print(f"[{procesados}/{total_archivos}] [📅 {anio_archivo}] ✅ Extraído: {file_name}")
+                        filas_extraidas = len(res)
+                        if filas_extraidas == 0:
+                            print(f"[{procesados}/{total_archivos}] [📅 {anio_archivo}] ⚠️ Extraído pero con 0 FILAS VÁLIDAS: {file_name}")
+                        else:
+                            print(f"[{procesados}/{total_archivos}] [📅 {anio_archivo}] ✅ Extraído ({filas_extraidas} filas): {file_name}")
                     else:
                         print(f"[{procesados}/{total_archivos}] [📅 {anio_archivo}] ⚠️ Extraído pero sin datos válidos (Falta columna Rate o Horas): {file_name}")
                         
@@ -329,7 +333,8 @@ def run_presupuestos_pipeline():
         resultados = list(executor.map(worker, archivos_a_procesar))
 
     for r in resultados:
-        if r is not None: lista_dfs.append(r)
+        if r is not None and not r.is_empty(): 
+            lista_dfs.append(r)
 
     if archivos_fallidos:
         print("\n" + "="*70)

@@ -181,16 +181,26 @@ def limpiar_dataframe_pmo(raw_rows, file_name, tipo, traductor):
         if "Situación" in df.columns:
             df = df.filter(pl.col("Situación").cast(pl.Utf8).str.to_uppercase().str.strip_chars().is_in(["REAL", "PROYECTADO"]))
 
-        if "USD" in df.columns:
-            df = df.with_columns(
-                pl.col("USD").cast(pl.Utf8)
-                .str.replace_all(r"[^0-9,.]", "")
-                .str.replace_all(r"\.", "")
-                .str.replace(",", ".")
-                .alias("USD")
-            )
-            df = df.with_columns(pl.col("USD").cast(pl.Float64, strict=False))
-            df = df.filter(pl.col("USD").is_not_null() & (pl.col("USD") > 0))
+        # Limpieza numérica de las nuevas columnas USD
+        tiene_filtro_usd = False
+        condicion_usd = pl.lit(False)
+        for col_usd in ["USD con impuestos", "USD sin impuestos"]:
+            if col_usd in df.columns:
+                df = df.with_columns(
+                    pl.col(col_usd).cast(pl.Utf8)
+                    .str.replace_all(r"[^0-9,.]", "")
+                    .str.replace_all(r"\.", "")
+                    .str.replace(",", ".")
+                    .alias(col_usd)
+                )
+                df = df.with_columns(pl.col(col_usd).cast(pl.Float64, strict=False))
+                
+                # Preparamos el filtro: al menos una de las columnas debe tener un monto válido > 0
+                condicion_usd = condicion_usd | (pl.col(col_usd).is_not_null() & (pl.col(col_usd) > 0))
+                tiene_filtro_usd = True
+                
+        if tiene_filtro_usd:
+            df = df.filter(condicion_usd)
 
         if "Monto con Impuestos" in df.columns:
             df = df.with_columns(
