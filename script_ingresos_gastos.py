@@ -20,33 +20,37 @@ ORDEN_MAESTRO = [
     "archivo_origen", "Tipo_Movimiento", "Fecha", "Proyecto", "País de facturación", 
     "Categoría", "Tipo de gasto", "Descripción", "Producto/Entregable/Servicio", 
     "Monto sin Impuestos", "IGV/IVA/Otros", "Monto con Impuestos", 
-    "Moneda", "TC", "USD", "Fecha de entrega del producto", 
+    "Moneda", "TC", "USD con impuestos", "USD sin impuestos", "Fecha de entrega del producto", 
     "Fecha de emisión del comprobante", "Situación", "Fecha de factura proveedor"
 ]
 
 TRADUCTOR_INGRESOS = {
     "Proyecto / Cuenta analítica" : "Proyecto",
-    "2" : "Proyecto"
+    "2" : "Proyecto",
+    "USD" : "USD con impuestos",
+    "USD (sin impuestos)": "USD sin impuestos"
 }
 
 # 2. COLUMNAS_INGRESOS (Sin proyecto_id)
 COLUMNAS_INGRESOS = [
     "Fecha", "Proyecto", "País de facturación", "Producto/Entregable/Servicio", 
     "Monto sin Impuestos", "IGV/IVA/Otros", "Monto con Impuestos", 
-    "Moneda", "TC", "USD", "Fecha de entrega del producto", 
+    "Moneda", "TC", "USD con impuestos", "USD sin impuestos", "Fecha de entrega del producto", 
     "Fecha de emisión del comprobante", "Situación"
 ]
 
 TRADUCTOR_GASTOS = {
     "Monto Total / (Monto sin Impuestos)": "Monto sin Impuestos",
-    "SItuación": "Situación"
+    "SItuación": "Situación",
+    "USD" : "USD con impuestos",
+    "USD (sin impuestos)": "USD sin impuestos"
 }
 
 # 3. COLUMNAS_GASTOS (Sin proyecto_id)
-COLUMNAS_GASTOS = [
+COLUMNAS_GASTOS = [ 
     "Fecha", "Proyecto", "País de facturación", "Categoría", "Tipo de gasto", 
     "Descripción", "Fecha de factura proveedor", "Monto sin Impuestos", 
-    "IGV/IVA/Otros", "Monto con Impuestos", "Moneda", "TC", "USD", "Situación"
+    "IGV/IVA/Otros", "Monto con Impuestos", "Moneda", "TC", "USD con impuestos", "USD sin impuestos", "Situación"
 ]
 
 # ==============================================================================
@@ -130,18 +134,24 @@ def limpiar_dataframe_pmo(raw_rows, file_name, tipo, traductor):
         
         for col_real in df.columns:
             col_upper = col_real.upper()
+            col_limpia = col_upper.replace('\n', ' ').replace('\r', ' ').strip()
+            while "  " in col_limpia: col_limpia = col_limpia.replace("  ", " ")
             
             objetivo = traductor.get(col_real) if traductor else None
             
             if not objetivo:
-                if col_upper.startswith("PROYECTO"): 
+                if col_limpia.startswith("PROYECTO"): 
                     objetivo = "Proyecto"
-                elif col_real == "2" or col_upper.startswith("MONTO SIN"): 
+                elif col_real == "2" or col_limpia.startswith("MONTO SIN"): 
                     objetivo = "Monto sin Impuestos"
-                elif col_upper.startswith("MONTO CON"): 
+                elif col_limpia.startswith("MONTO CON"): 
                     objetivo = "Monto con Impuestos"
-                elif col_upper.startswith("SITUACI"): 
+                elif col_limpia.startswith("SITUACI"): 
                     objetivo = "Situación"
+                elif "USD" in col_limpia and "SIN IMPUESTOS" in col_limpia:
+                    objetivo = "USD sin impuestos"
+                elif col_limpia == "USD" or ("USD" in col_limpia and "CON IMPUESTOS" in col_limpia):
+                    objetivo = "USD con impuestos"
                 else:
                     objetivo = col_real
             
@@ -347,6 +357,7 @@ def run_finanzas_pipeline():
             export_to_drive(gc, base_looker, MASTER_SPREADSHEET_ID, "Base_Looker")
 
             print(f"\n✅ Pipeline Finalizado.")
+            
         else:
             print("❌ CRÍTICO: No se recolectaron datos. Revisa tus filtros o los archivos en Drive.")
             sys.exit(1)
