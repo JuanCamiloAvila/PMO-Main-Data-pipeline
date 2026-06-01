@@ -1,3 +1,5 @@
+### script ingresos y gastos V2
+
 import os
 import sys
 import json
@@ -15,6 +17,15 @@ from concurrent.futures import ThreadPoolExecutor
 FOLDER_IDS_PRESUPUESTOS = ["18Ma7mj63Egs_KfyLtkdOPQnvBs6__aGw"]
 MASTER_SPREADSHEET_ID = "1vUcnKrp5EfCbW5mh3L76x_UoyB4m9BPhJ_pKHPbxsGM"
 
+# Nombres de pestañas - Formato nuevo (archivos "Monitoreo...")
+PESTANA_MIXTA = "Proyección Ingresos - Gastos"
+PESTANA_MONITOREO_IN = "Monitoreo Ingresos"
+PESTANA_MONITOREO_OUT = "Monitoreo Gastos"
+ 
+# Nombres de pestañas - Formato legacy (archivos "NUEVO...") — ELIMINAR POST-MIGRACIÓN
+PESTANA_LEGACY_IN = "Proyección - Ingresos"
+PESTANA_LEGACY_OUT = "Proyección - Gastos"
+
 # 1. ORDEN_MAESTRO (Sin proyecto_id)
 ORDEN_MAESTRO = [
     "archivo_origen", "Tipo_Movimiento", "Fecha", "Proyecto", "País de facturación", 
@@ -28,7 +39,8 @@ TRADUCTOR_INGRESOS = {
     "Proyecto / Cuenta analítica" : "Proyecto",
     "2" : "Proyecto",
     "USD" : "USD con impuestos",
-    "USD (sin impuestos)": "USD sin impuestos"
+    "USD (sin impuestos)": "USD sin impuestos",
+    "Tipo de movimiento": "Situación"
 }
 
 # 2. COLUMNAS_INGRESOS (Sin proyecto_id)
@@ -43,7 +55,16 @@ TRADUCTOR_GASTOS = {
     "Monto Total / (Monto sin Impuestos)": "Monto sin Impuestos",
     "SItuación": "Situación",
     "USD" : "USD con impuestos",
-    "USD (sin impuestos)": "USD sin impuestos"
+    "USD (sin impuestos)": "USD sin impuestos",
+    "Tipo de movimiento": "Situación"
+}
+
+# Traductor para pestaña mixta (Proyección Ingresos - Gastos)
+TRADUCTOR_MIXTO = {
+    "Monto Total / (Monto sin Impuestos)": "Monto sin Impuestos",
+    "USD" : "USD con impuestos",
+    "USD (sin impuestos)": "USD sin impuestos",
+    "Ingreso o Gasto": "Tipo_Movimiento"
 }
 
 # 3. COLUMNAS_GASTOS (Sin proyecto_id)
@@ -92,7 +113,7 @@ def export_to_drive(gc, df: pl.DataFrame, file_id: str, tab_name: str):
                 intentos += 1
                 time.sleep(20 * intentos)
 
-def limpiar_dataframe_pmo(raw_rows, file_name, tipo, traductor):
+def limpiar_dataframe_pmo(raw_rows, file_name, tipo, traductor, usar_columna_tipo=False, solo_real=False):
     if not raw_rows or len(raw_rows) < 2: return None
     
     # --- 🎯 1. RADAR DE ENCABEZADOS ---
@@ -170,12 +191,20 @@ def limpiar_dataframe_pmo(raw_rows, file_name, tipo, traductor):
         df = df.rename(mapeo_seguro)
         
         # --- 🎯 CREACIÓN DE LA COLUMNA FECHA UNIFICADA ---
-        if tipo == "Ingreso" and "Fecha de emisión del comprobante" in df.columns:
+        if usar_columna_tipo:
+            if "Fecha de factura proveedor" in df.columns:
+                df = df.with_columns(pl.col("Fecha de factura proveedor").alias("Fecha"))
+            else:
+                df = df.with_columns(pl.lit("").alias("Fecha"))
+        elif tipo == "Ingreso" and "Fecha de emisión del comprobante" in df.columns:
             df = df.with_columns(pl.col("Fecha de emisión del comprobante").alias("Fecha"))
         elif tipo == "Gasto" and "Fecha de factura proveedor" in df.columns:
             df = df.with_columns(pl.col("Fecha de factura proveedor").alias("Fecha"))
         else:
             df = df.with_columns(pl.lit("").alias("Fecha"))
+            
+        if usar_columna_tipo:
+            df = df.with_columns(pl.lit("Proyectado").alias("Situación"))
 
         # --- 🧹 4. PURGA DE FILAS FANTASMA ---
         columnas_clave = [c for c in ["Proyecto", "Situación", "Monto con Impuestos", "Descripción", "Fecha"] if c in df.columns]
@@ -189,7 +218,11 @@ def limpiar_dataframe_pmo(raw_rows, file_name, tipo, traductor):
         
         # --- 🛡️ 5. FILTROS ESTRICTOS FINANCIEROS Y LIMPIEZA NUMÉRICA ---
         if "Situación" in df.columns:
-            df = df.filter(pl.col("Situación").cast(pl.Utf8).str.to_uppercase().str.strip_chars().is_in(["REAL", "PROYECTADO"]))
+            if solo_real:
+                # FÁCIL REVERSIÓN: Si dirección no lo acepta, elimina esta condición if/else y deja solo la lista con ["REAL", "PROYECTADO"].
+                df = df.filter(pl.col("Situación").cast(pl.Utf8).str.to_uppercase().str.strip_chars().is_in(["REAL"]))
+            else:
+                df = df.filter(pl.col("Situación").cast(pl.Utf8).str.to_uppercase().str.strip_chars().is_in(["REAL", "PROYECTADO"]))
 
         # Limpieza numérica de las nuevas columnas USD
         tiene_filtro_usd = False
@@ -234,13 +267,18 @@ def limpiar_dataframe_pmo(raw_rows, file_name, tipo, traductor):
             print(f"   🔎 [{tipo}] {file_name}: {total_inicial} reales extraídas -> {filas_finales} válidas.")
 
         # --- 7. SELECCIÓN FINAL Y EXTRACCIÓN POR DÍGITO ---
-        cols_finales = COLUMNAS_INGRESOS if tipo == "Ingreso" else COLUMNAS_GASTOS
+        if usar_columna_tipo:
+            cols_finales = list(dict.fromkeys(COLUMNAS_INGRESOS + COLUMNAS_GASTOS)) + ["Tipo_Movimiento"]
+        else:
+            cols_finales = COLUMNAS_INGRESOS if tipo == "Ingreso" else COLUMNAS_GASTOS
         presentes = [c for c in cols_finales if c in df.columns]
         
         if df.is_empty() or not presentes: return None
 
-        # 1. Quitamos "NUEVO" en cualquier combinación
-        nombre_temp = file_name.replace("NUEVO", "").replace("nuevo", "").replace("Nuevo", "").strip()
+        # 1. Quitamos "NUEVO" o "Monitoreo" en cualquier combinación
+        nombre_temp = file_name
+        for prefijo in ["NUEVO", "nuevo", "Nuevo", "MONITOREO", "monitoreo", "Monitoreo"]:
+            nombre_temp = nombre_temp.replace(prefijo, "").strip()
 
         # 2. Buscamos el índice del primer dígito numérico
         indice_inicio = 0
@@ -252,11 +290,15 @@ def limpiar_dataframe_pmo(raw_rows, file_name, tipo, traductor):
         # 3. Extraemos desde el primer dígito y quitamos la extensión del archivo
         nombre_proyecto_estandar = nombre_temp[indice_inicio:].split(".")[0].strip()
 
-        return df.select(presentes).with_columns([
-            pl.lit(tipo).alias("Tipo_Movimiento"), 
+        columnas_meta = [
             pl.lit(file_name).alias("archivo_origen"),
-            pl.lit(nombre_proyecto_estandar).alias("Proyecto") 
-        ])
+            pl.lit(nombre_proyecto_estandar).alias("Proyecto")
+        ]
+        
+        if not usar_columna_tipo:
+            columnas_meta.append(pl.lit(tipo).alias("Tipo_Movimiento"))
+
+        return df.select(presentes).with_columns(columnas_meta)
 
     # ESTE ES EL BLOQUE QUE FALTABA
     except Exception as e:
@@ -277,7 +319,8 @@ def run_finanzas_pipeline():
         files.extend(gc.list_spreadsheet_files(folder_id=f_id))
     
     files_validos = [f for f in {fi['id']: fi for fi in files}.values() 
-                     if f['name'].upper().startswith("NUEVO") and "COPIA" not in f['name'].upper()]
+                     if (f['name'].upper().startswith("NUEVO") or f['name'].upper().startswith("MONITOREO")) 
+                     and "COPIA" not in f['name'].upper()]
 
     total_archivos = len(files_validos)
     procesados = 0
@@ -289,21 +332,40 @@ def run_finanzas_pipeline():
         nonlocal procesados
         res = None
         intentos = 0
+        es_formato_nuevo = f['name'].upper().startswith("MONITOREO")
         # 🔥 CAMBIADO: De 3 a 6 intentos en la lectura de archivos
         while intentos < 6:
             try:
                 sh = gc.open_by_key(f['id'])
-                rangos = ["'Proyección - Ingresos'!A:Z", "'Proyección - Gastos'!A:Z"]
-                batch = sh.values_batch_get(rangos)
                 
-                df_in = limpiar_dataframe_pmo(batch['valueRanges'][0].get('values', []), f['name'], "Ingreso", TRADUCTOR_INGRESOS)
-                df_out = limpiar_dataframe_pmo(batch['valueRanges'][1].get('values', []), f['name'], "Gasto", TRADUCTOR_GASTOS)
+                if es_formato_nuevo:
+                    rangos = [
+                        f"'{PESTANA_MIXTA}'!A:Z",
+                        f"'{PESTANA_MONITOREO_IN}'!A:Z",
+                        f"'{PESTANA_MONITOREO_OUT}'!A:Z"
+                    ]
+                    batch = sh.values_batch_get(rangos)
+                    
+                    df_mixta = limpiar_dataframe_pmo(batch['valueRanges'][0].get('values', []), f['name'], "Mixto", TRADUCTOR_MIXTO, usar_columna_tipo=True)
+                    # FÁCIL REVERSIÓN: Quitar 'solo_real=True' si se desea permitir de nuevo extraer 'Proyectado' en las pestañas de Monitoreo
+                    df_mon_in = limpiar_dataframe_pmo(batch['valueRanges'][1].get('values', []), f['name'], "Ingreso", TRADUCTOR_INGRESOS, solo_real=True)
+                    df_mon_out = limpiar_dataframe_pmo(batch['valueRanges'][2].get('values', []), f['name'], "Gasto", TRADUCTOR_GASTOS, solo_real=True)
+                    
+                    res = {"in": df_mon_in, "out": df_mon_out, "mixta": df_mixta}
+                else:
+                    rangos = [f"'{PESTANA_LEGACY_IN}'!A:Z", f"'{PESTANA_LEGACY_OUT}'!A:Z"]
+                    batch = sh.values_batch_get(rangos)
+                    
+                    df_in = limpiar_dataframe_pmo(batch['valueRanges'][0].get('values', []), f['name'], "Ingreso", TRADUCTOR_INGRESOS)
+                    df_out = limpiar_dataframe_pmo(batch['valueRanges'][1].get('values', []), f['name'], "Gasto", TRADUCTOR_GASTOS)
+                    
+                    res = {"in": df_in, "out": df_out}
                 
-                res = {"in": df_in, "out": df_out}
                 with contador_lock:
                     procesados += 1
                     archivos_exitosos.append(f['name'])
-                    print(f"[{procesados}/{total_archivos}] ✅ Completado: {f['name']}")
+                    formato = "NUEVO" if es_formato_nuevo else "LEGACY"
+                    print(f"[{procesados}/{total_archivos}] ✅ [{formato}] {f['name']}")
                 break
             except gspread.exceptions.APIError as e:
                 if any(err in str(e) for err in ["429", "500", "502", "503", "504"]):
@@ -320,27 +382,35 @@ def run_finanzas_pipeline():
                 break
         return res
 
-    lista_in, lista_out = [], []
+    lista_in, lista_out, lista_mixta = [], [], []
     with ThreadPoolExecutor(max_workers=3) as executor:
         resultados = list(executor.map(worker, files_validos))
 
     for r in resultados:
         if r:
-            if r['in'] is not None: lista_in.append(r['in'])
-            if r['out'] is not None: lista_out.append(r['out'])
+            if r.get('in') is not None: lista_in.append(r['in'])
+            if r.get('out') is not None: lista_out.append(r['out'])
+            if r.get('mixta') is not None: lista_mixta.append(r['mixta'])
 
     base_looker = None
-    if lista_in or lista_out:
+    if lista_in or lista_out or lista_mixta:
         print("\n⚡ Consolidando datos...")
-        def union(lista): return pl.concat(lista, how="diagonal") if lista else None
+        def union(lista): 
+            if not lista: return None
+            df = pl.concat(lista, how="diagonal")
+            # Forzar el orden maestro para que todas las pestañas se vean iguales
+            cols = [c for c in ORDEN_MAESTRO if c in df.columns]
+            return df.select(cols)
         
         master_in = union(lista_in)
         master_out = union(lista_out)
+        master_mixta = union(lista_mixta)
 
         if master_in is not None: export_to_drive(gc, master_in, MASTER_SPREADSHEET_ID, "Ingresos")
         if master_out is not None: export_to_drive(gc, master_out, MASTER_SPREADSHEET_ID, "Gastos")
+        if master_mixta is not None: export_to_drive(gc, master_mixta, MASTER_SPREADSHEET_ID, "Proyección")
         
-        comb = [df for df in [master_in, master_out] if df is not None]
+        comb = [df for df in [master_in, master_out, master_mixta] if df is not None]
         if comb:
             base_looker = pl.concat(comb, how="diagonal")
             
@@ -375,4 +445,4 @@ if __name__ == "__main__":
     except Exception as e:
         print("\n❌ Error crítico de ejecución:")
         traceback.print_exc()
-        sys.exit(1)
+        sys.exit(1)  
