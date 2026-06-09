@@ -22,23 +22,24 @@ TEST_FILE_IDS = [
 SOURCES_CONFIG = {
     "2026": {
         "folders": [
-            {"id": "1EbqyjMb841artvPenWBuu2PcJuOc4w_Y", "label": "Estratégico"},
-            {"id": "15p3qq7KtFDgDqZKh1vFCkKrczDkNIY7k", "label": "Empresarial"},
-            {"id": "1hA9Sb6nYY9vuaxNnrTG7tYginYhDVX-X", "label": "Desarrollo"},
-            {"id": "1dLYU7aYYkPZKN012vtmvj15a01gWsu1_", "label": "Directorio"}
+            #{"id": "1EbqyjMb841artvPenWBuu2PcJuOc4w_Y", "label": "Estratégico"},
+            #{"id": "15p3qq7KtFDgDqZKh1vFCkKrczDkNIY7k", "label": "Empresarial"},
+            #{"id": "1hA9Sb6nYY9vuaxNnrTG7tYginYhDVX-X", "label": "Desarrollo"},
+            #{"id": "1dLYU7aYYkPZKN012vtmvj15a01gWsu1_", "label": "Directorio"},
+            {"id": "1uFZXGHpfab4iL-mvmzH0i5boNphhZHEj", "label": "Testeo - Nuevla Plantilla Flujo de Presupuesto"},
         ]
     },
     "2025": {
         "folders": [
-            {"id": "1m-LdkuaKc4j-EVfMCLF6gpr_IUnFzaUF", "label": "Solicitudes proyectos pasados"},
-            {"id": "1Z-cWyN3qjCMRAWG1SCsJh2MD7s-7nk4mS", "label": "Proyectos Estratégicos"},
-            {"id": "1M9xSJl-7riGk-IUfg7bH1YirMtRkdFvB", "label": "Empresarial"},
-            {"id": "1nuxC_fhk6arz4N1mVCPUWe-3bkQW3_Yp", "label": "Desarrollo"},
-            {"id": "1nVhpyaW0d3uFQdF7t6_qgmTJpkBmL8xr", "label": "Directorio"}
+            #{"id": "1m-LdkuaKc4j-EVfMCLF6gpr_IUnFzaUF", "label": "Solicitudes proyectos pasados"},
+            #{"id": "1Z-cWyN3qjCMRAWG1SCsJh2MD7s-7nk4mS", "label": "Proyectos Estratégicos"},
+            #{"id": "1M9xSJl-7riGk-IUfg7bH1YirMtRkdFvB", "label": "Empresarial"},
+            #{"id": "1nuxC_fhk6arz4N1mVCPUWe-3bkQW3_Yp", "label": "Desarrollo"},
+            #{"id": "1nVhpyaW0d3uFQdF7t6_qgmTJpkBmL8xr", "label": "Directorio"}
         ]
     }
 }
-
+ 
 DWH_FOLDER_ID = "1_8cyY32pxRXU3Au0OZOor1wNN7uXO-wr"
 RATES_FILE_ID = "1PFVuVLKbNWh2TJEG-x2K8-KvHQBuqbRWurAx1PI67FA" 
 RATES_SHEET_NAME = "Rates"
@@ -114,7 +115,7 @@ def limpiar_nombre(nombre):
     return ''.join(c for c in unicodedata.normalize('NFD', nombre)
                   if unicodedata.category(c) != 'Mn')
 
-def extraer_equipo_interno(raw_rows, file_name):
+def extraer_equipo_interno(raw_rows, file_name, formato="LEGACY"):
     if not raw_rows or len(raw_rows) < 2: return None
     
     cleaned_rows = []
@@ -161,8 +162,9 @@ def extraer_equipo_interno(raw_rows, file_name):
     df = pl.DataFrame(normalized_rows, schema=headers, orient="row").with_columns(pl.all().cast(pl.Utf8))
     
     col_nombre = next((c for c in df.columns if "NOMBRE COMPLETO" in c.upper()), None)
-    col_horas = next((c for c in df.columns if "CANTIDAD DE HORAS" in c.upper() or "HORAS PRESUPUESTADAS" in c.upper()), None)
+    col_horas = next((c for c in df.columns if "CANTIDAD DE HORAS" in c.upper() or "HORAS PRESUPUESTADAS" in c.upper() or "DÍAS PRESUPUESTADOS" in c.upper() or "DIAS PRESUPUESTADOS" in c.upper()), None)
     col_rate = next((c for c in df.columns if "RATE" in c.upper()), None)
+    col_rol = next((c for c in df.columns if "ROL DE PROYECTO" in c.upper() or "CARGO EN" in c.upper() or "ROL" == c.upper().strip() or "CARGO" == c.upper().strip()), None)
     
     if not col_nombre or not col_horas or not col_rate: return None
 
@@ -171,22 +173,45 @@ def extraer_equipo_interno(raw_rows, file_name):
         (~pl.col(col_nombre).str.to_uppercase().str.contains("INSERTAR"))
     )
     
-    df = df.with_columns([
+    es_dias = "DÍA" in col_horas.upper() or "DIA" in col_horas.upper()
+    factor = 8.0 if es_dias else 1.0
+
+    columnas_nuevas = [
         pl.col(col_nombre).alias("nombre"),
-        pl.col(col_horas).str.replace(",", ".").cast(pl.Float64, strict=False).alias("Horas_Presupuestadas"),
+        (pl.col(col_horas).str.replace(",", ".").cast(pl.Float64, strict=False) * factor).alias("Horas_Presupuestadas"),
         pl.col(col_rate).str.replace_all(r"[^\d\.\,]", "").str.replace(",", ".")
             .cast(pl.Float64, strict=False).fill_null(0.0).alias("Costo_interno")
-    ])
+    ]
+    
+    if col_rol:
+        columnas_nuevas.append(pl.col(col_rol).alias("Rol"))
+    else:
+        columnas_nuevas.append(pl.lit("").alias("Rol"))
+        
+    df = df.with_columns(columnas_nuevas)
     
     df = df.filter(pl.col("Horas_Presupuestadas").is_not_null())
-    nombre_archivo_limpio = file_name.replace("Productividad: ", "").strip()
+    
+    # Limpiar nombre según el formato
+    if formato == "NUEVO":
+        nombre_temp = file_name
+        for prefijo in ["NUEVO", "nuevo", "Nuevo", "MONITOREO", "monitoreo", "Monitoreo"]:
+            nombre_temp = nombre_temp.replace(prefijo, "").strip()
+        indice_inicio = 0
+        for i, char in enumerate(nombre_temp):
+            if char.isdigit():
+                indice_inicio = i
+                break
+        nombre_archivo_limpio = nombre_temp[indice_inicio:].split(".")[0].strip()
+    else:
+        nombre_archivo_limpio = file_name.replace("Productividad: ", "").strip()
     
     df = df.with_columns([
         pl.lit(file_name).alias("archivo_origen"),
         pl.lit(nombre_archivo_limpio).alias("Proyecto")
     ])
 
-    return df.select(["archivo_origen", "Proyecto", "nombre", "Horas_Presupuestadas", "Costo_interno"])
+    return df.select(["archivo_origen", "Proyecto", "nombre", "Rol", "Horas_Presupuestadas", "Costo_interno"])
 
 @api_retry()
 def obtener_directorio_correos(gc):
@@ -263,10 +288,14 @@ def run_presupuestos_pipeline():
                 archivos_en_esta_carpeta = []
                 for f in files_in_folder:
                     nombre = f.get('name', '')
-                    if nombre.startswith("Productividad:") and "Template" not in nombre and "-" in nombre:
+                    es_legacy = nombre.startswith("Productividad:") and "Template" not in nombre and "-" in nombre
+                    es_nuevo = nombre.upper().startswith("MONITOREO") and "COPIA" not in nombre.upper()
+                    
+                    if es_legacy or es_nuevo:
                         archivos_en_esta_carpeta.append({
                             "id": f['id'],
-                            "anio": anio
+                            "anio": anio,
+                            "formato": "NUEVO" if es_nuevo else "LEGACY"
                         })
                 
                 archivos_a_procesar.extend(archivos_en_esta_carpeta)
@@ -292,6 +321,7 @@ def run_presupuestos_pipeline():
         
         file_id = file_info["id"]
         anio_archivo = file_info["anio"]
+        formato = file_info.get("formato", "LEGACY")
         
         res = None
         file_name = f"ID Desconocido: {file_id}" 
@@ -300,15 +330,19 @@ def run_presupuestos_pipeline():
             sh = abrir_archivo_protegido(gc, file_id)
             if sh:
                 file_name = sh.title
-                raw_data = leer_valores_pestana(sh, "Equipo")
+                
+                # Para el nuevo formato y el viejo la pestaña se asume "Equipo" por ahora. 
+                # Si en el nuevo formato la pestaña se llama distinto, lo ajustaremos.
+                nombre_pestana = "Equipo" 
+                raw_data = leer_valores_pestana(sh, nombre_pestana)
                 
                 if raw_data is not None:
-                    res = extraer_equipo_interno(raw_data, file_name)
+                    res = extraer_equipo_interno(raw_data, file_name, formato)
                     
                 with contador_lock:
                     procesados += 1
                     if raw_data is None:
-                        print(f"[{procesados}/{total_archivos}] [📅 {anio_archivo}] ⏭️ Ignorado (Sin pestaña 'Equipo'): {file_name}")
+                        print(f"[{procesados}/{total_archivos}] [📅 {anio_archivo}] [{formato}] ⏭️ Ignorado (Sin pestaña '{nombre_pestana}'): {file_name}")
                     elif res is not None:
                         filas_extraidas = len(res)
                         if filas_extraidas == 0:
@@ -391,6 +425,7 @@ def run_presupuestos_pipeline():
             "proyecto_id", 
             "Proyecto", 
             "nombre", 
+            "Rol",
             "Horas_Presupuestadas", 
             "Costo_interno", 
             "Costo_Total_Proyecto", 

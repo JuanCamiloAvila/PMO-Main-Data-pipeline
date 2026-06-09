@@ -14,17 +14,13 @@ from concurrent.futures import ThreadPoolExecutor
 # ==============================================================================
 # 1. CONFIGURACIÓN
 # ==============================================================================
-FOLDER_IDS_PRESUPUESTOS = ["18Ma7mj63Egs_KfyLtkdOPQnvBs6__aGw"]
+FOLDER_IDS_PRESUPUESTOS = ["1uFZXGHpfab4iL-mvmzH0i5boNphhZHEj"]
 MASTER_SPREADSHEET_ID = "1vUcnKrp5EfCbW5mh3L76x_UoyB4m9BPhJ_pKHPbxsGM"
 
 # Nombres de pestañas - Formato nuevo (archivos "Monitoreo...")
 PESTANA_MIXTA = "Proyección Ingresos - Gastos"
 PESTANA_MONITOREO_IN = "Monitoreo Ingresos"
 PESTANA_MONITOREO_OUT = "Monitoreo Gastos"
- 
-# Nombres de pestañas - Formato legacy (archivos "NUEVO...") — ELIMINAR POST-MIGRACIÓN
-PESTANA_LEGACY_IN = "Proyección - Ingresos"
-PESTANA_LEGACY_OUT = "Proyección - Gastos"
 
 # 1. ORDEN_MAESTRO (Sin proyecto_id)
 ORDEN_MAESTRO = [
@@ -275,9 +271,9 @@ def limpiar_dataframe_pmo(raw_rows, file_name, tipo, traductor, usar_columna_tip
         
         if df.is_empty() or not presentes: return None
 
-        # 1. Quitamos "NUEVO" o "Monitoreo" en cualquier combinación
+        # 1. Quitamos "Monitoreo" en cualquier combinación
         nombre_temp = file_name
-        for prefijo in ["NUEVO", "nuevo", "Nuevo", "MONITOREO", "monitoreo", "Monitoreo"]:
+        for prefijo in ["MONITOREO", "monitoreo", "Monitoreo"]:
             nombre_temp = nombre_temp.replace(prefijo, "").strip()
 
         # 2. Buscamos el índice del primer dígito numérico
@@ -319,7 +315,7 @@ def run_finanzas_pipeline():
         files.extend(gc.list_spreadsheet_files(folder_id=f_id))
     
     files_validos = [f for f in {fi['id']: fi for fi in files}.values() 
-                     if (f['name'].upper().startswith("NUEVO") or f['name'].upper().startswith("MONITOREO")) 
+                     if f['name'].upper().startswith("MONITOREO") 
                      and "COPIA" not in f['name'].upper()]
 
     total_archivos = len(files_validos)
@@ -332,40 +328,29 @@ def run_finanzas_pipeline():
         nonlocal procesados
         res = None
         intentos = 0
-        es_formato_nuevo = f['name'].upper().startswith("MONITOREO")
         # 🔥 CAMBIADO: De 3 a 6 intentos en la lectura de archivos
         while intentos < 6:
             try:
                 sh = gc.open_by_key(f['id'])
                 
-                if es_formato_nuevo:
-                    rangos = [
-                        f"'{PESTANA_MIXTA}'!A:Z",
-                        f"'{PESTANA_MONITOREO_IN}'!A:Z",
-                        f"'{PESTANA_MONITOREO_OUT}'!A:Z"
-                    ]
-                    batch = sh.values_batch_get(rangos)
-                    
-                    df_mixta = limpiar_dataframe_pmo(batch['valueRanges'][0].get('values', []), f['name'], "Mixto", TRADUCTOR_MIXTO, usar_columna_tipo=True)
-                    # FÁCIL REVERSIÓN: Quitar 'solo_real=True' si se desea permitir de nuevo extraer 'Proyectado' en las pestañas de Monitoreo
-                    df_mon_in = limpiar_dataframe_pmo(batch['valueRanges'][1].get('values', []), f['name'], "Ingreso", TRADUCTOR_INGRESOS, solo_real=True)
-                    df_mon_out = limpiar_dataframe_pmo(batch['valueRanges'][2].get('values', []), f['name'], "Gasto", TRADUCTOR_GASTOS, solo_real=True)
-                    
-                    res = {"in": df_mon_in, "out": df_mon_out, "mixta": df_mixta}
-                else:
-                    rangos = [f"'{PESTANA_LEGACY_IN}'!A:Z", f"'{PESTANA_LEGACY_OUT}'!A:Z"]
-                    batch = sh.values_batch_get(rangos)
-                    
-                    df_in = limpiar_dataframe_pmo(batch['valueRanges'][0].get('values', []), f['name'], "Ingreso", TRADUCTOR_INGRESOS)
-                    df_out = limpiar_dataframe_pmo(batch['valueRanges'][1].get('values', []), f['name'], "Gasto", TRADUCTOR_GASTOS)
-                    
-                    res = {"in": df_in, "out": df_out}
+                rangos = [
+                    f"'{PESTANA_MIXTA}'!A:Z",
+                    f"'{PESTANA_MONITOREO_IN}'!A:Z",
+                    f"'{PESTANA_MONITOREO_OUT}'!A:Z"
+                ]
+                batch = sh.values_batch_get(rangos)
+                
+                df_mixta = limpiar_dataframe_pmo(batch['valueRanges'][0].get('values', []), f['name'], "Mixto", TRADUCTOR_MIXTO, usar_columna_tipo=True)
+                # FÁCIL REVERSIÓN: Quitar 'solo_real=True' si se desea permitir de nuevo extraer 'Proyectado' en las pestañas de Monitoreo
+                df_mon_in = limpiar_dataframe_pmo(batch['valueRanges'][1].get('values', []), f['name'], "Ingreso", TRADUCTOR_INGRESOS, solo_real=True)
+                df_mon_out = limpiar_dataframe_pmo(batch['valueRanges'][2].get('values', []), f['name'], "Gasto", TRADUCTOR_GASTOS, solo_real=True)
+                
+                res = {"in": df_mon_in, "out": df_mon_out, "mixta": df_mixta}
                 
                 with contador_lock:
                     procesados += 1
                     archivos_exitosos.append(f['name'])
-                    formato = "NUEVO" if es_formato_nuevo else "LEGACY"
-                    print(f"[{procesados}/{total_archivos}] ✅ [{formato}] {f['name']}")
+                    print(f"[{procesados}/{total_archivos}] ✅ [NUEVO] {f['name']}")
                 break
             except gspread.exceptions.APIError as e:
                 if any(err in str(e) for err in ["429", "500", "502", "503", "504"]):
