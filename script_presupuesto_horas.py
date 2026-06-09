@@ -138,8 +138,12 @@ def extraer_equipo_interno(raw_rows, file_name, formato="LEGACY"):
     data_rows = []
     for row in raw_rows[header_idx + 1:]:
         row_upper = [str(cell).upper().strip() for cell in row]
-        if any("TOTAL" in cell or "EQUIPO EXTERNO" in cell for cell in row_upper):
+        
+        # El [:7] le dice a Python que solo mire las primeras 7 columnas (De la A a la G)
+        # Si la palabra "TOTAL" está en la columna H o más allá, no detendrá la lectura.
+        if any("TOTAL" in cell or "EQUIPO EXTERNO" in cell for cell in row_upper[:7]):
             break
+            
         data_rows.append(row)
     
     if not data_rows: return None
@@ -194,18 +198,18 @@ def extraer_equipo_interno(raw_rows, file_name, formato="LEGACY"):
     
     # Limpiar nombre según el formato
     if formato == "NUEVO":
-        nombre_temp = file_name
-        for prefijo in ["NUEVO", "nuevo", "Nuevo", "MONITOREO", "monitoreo", "Monitoreo"]:
-            nombre_temp = nombre_temp.replace(prefijo, "").strip()
+        import re 
+        
+        # Le dice a Python: Borra "Monitoreo" o "Nuevo" (y sus guiones) SOLO si están al inicio (^)
+        nombre_temp = re.sub(r"^(?i)(monitoreo|nuevo)\s*[\-]*\s*", "", file_name)
+        
         indice_inicio = 0
         for i, char in enumerate(nombre_temp):
             if char.isdigit():
                 indice_inicio = i
                 break
         nombre_archivo_limpio = nombre_temp[indice_inicio:].split(".")[0].strip()
-    else:
-        nombre_archivo_limpio = file_name.replace("Productividad: ", "").strip()
-    
+
     df = df.with_columns([
         pl.lit(file_name).alias("archivo_origen"),
         pl.lit(nombre_archivo_limpio).alias("Proyecto")
@@ -260,9 +264,6 @@ def obtener_directorio_correos(gc):
 def abrir_archivo_protegido(gc, file_id):
     return gc.open_by_key(file_id)
 
-@api_retry()
-def listar_archivos_protegido(gc, folder_id):
-    return gc.list_spreadsheet_files(folder_id=folder_id)
 
 @api_retry(max_retries=6)
 def leer_valores_pestana(sh, nombre_pestana):
@@ -276,6 +277,18 @@ def run_presupuestos_pipeline():
     print("🚀 Iniciando Extracción de Horas Presupuestadas...")
     gc = get_gspread_client()
     
+    # --- 1. NUEVO: Construimos el servicio nativo de Drive ---
+    from googleapiclient.discovery import build
+    scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+    token_str = os.environ.get('GOOGLE_OAUTH_TOKEN')
+    if token_str:
+        creds_drive = Credentials.from_authorized_user_info(json.loads(token_str), scopes)
+    else:
+        creds_drive = Credentials.from_authorized_user_file('token.json', scopes)
+        
+    drive_service = build('drive', 'v3', credentials=creds_drive)
+    # ---------------------------------------------------------
+
     archivos_a_procesar = []
     archivos_fallidos = []
 
@@ -283,7 +296,33 @@ def run_presupuestos_pipeline():
     for anio, config in SOURCES_CONFIG.items():
         for carpeta in config["folders"]:
             try:
-                files_in_folder = listar_archivos_protegido(gc, carpeta["id"])
+                f_id = carpeta["id"]
+                query = f"'{f_id}' in parents and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false"
+                
+                # --- 2. NUEVO: Búsqueda estricta con paginación y bypass de caché ---
+                files_in_folder = []
+                page_token = None
+                while True:
+                    res_drive = drive_service.files().list(
+                        q=query,
+                        fields="nextPageToken, files(id, name, trashed, parents)",
+                        supportsAllDrives=True,
+                        includeItemsFromAllDrives=True,
+                        pageToken=page_token
+                    ).execute()
+                    
+                    for archivo in res_drive.get('files', []):
+                        esta_en_papelera = archivo.get('trashed', False)
+                        padres_actuales = archivo.get('parents', [])
+                        
+                        # Doble validación en Python
+                        if not esta_en_papelera and f_id in padres_actuales:
+                            files_in_folder.append(archivo)
+                            
+                    page_token = res_drive.get('nextPageToken')
+                    if not page_token:
+                        break
+                # ----------------------------------------------------------------------
                 
                 archivos_en_esta_carpeta = []
                 for f in files_in_folder:

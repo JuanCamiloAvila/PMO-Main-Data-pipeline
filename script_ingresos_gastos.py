@@ -309,10 +309,47 @@ def run_finanzas_pipeline():
     print("🚀 Iniciando Híbrido Maestro (Multithreading + Batching + Auditoría)...")
     gc = get_gspread_client()
     
+    from googleapiclient.discovery import build
+    
+    # Reconstruimos las credenciales para acceder a la API de Drive directamente
+    scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+    token_str = os.environ.get('GOOGLE_OAUTH_TOKEN')
+    if token_str:
+        creds = Credentials.from_authorized_user_info(json.loads(token_str), scopes)
+    else:
+        creds = Credentials.from_authorized_user_file('token.json', scopes)
+        
+    drive_service = build('drive', 'v3', credentials=creds)
+
     files = []
     for f_url in FOLDER_IDS_PRESUPUESTOS:
         f_id = f_url.split('/folders/')[-1].split('?')[0].strip()
-        files.extend(gc.list_spreadsheet_files(folder_id=f_id))
+        query = f"'{f_id}' in parents and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false"
+        
+        page_token = None
+        while True:
+            # 1. Agregamos soporte para Unidades Compartidas y pedimos trashed/parents explícitamente
+            res_drive = drive_service.files().list(
+                q=query, 
+                fields="nextPageToken, files(id, name, trashed, parents)",
+                supportsAllDrives=True, 
+                includeItemsFromAllDrives=True,
+                pageToken=page_token
+            ).execute()
+            
+            # 2. Doble validación estricta en Python (Bypass al caché de Google)
+            for archivo in res_drive.get('files', []):
+                esta_en_papelera = archivo.get('trashed', False)
+                padres_actuales = archivo.get('parents', [])
+                
+                # Solo aceptamos el archivo si NO está en papelera y f_id SIGUE siendo su padre real
+                if not esta_en_papelera and f_id in padres_actuales:
+                    files.append(archivo)
+            
+            # 3. Paginación: Asegura que lea todos los archivos si hay más de 100
+            page_token = res_drive.get('nextPageToken')
+            if not page_token:
+                break
     
     files_validos = [f for f in {fi['id']: fi for fi in files}.values() 
                      if f['name'].upper().startswith("MONITOREO") 
