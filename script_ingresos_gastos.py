@@ -271,19 +271,26 @@ def limpiar_dataframe_pmo(raw_rows, file_name, tipo, traductor, usar_columna_tip
         
         if df.is_empty() or not presentes: return None
 
-        # Extraemos el nombre del proyecto: el formato es
-        # "Monitoreo - [código] - [Empresa] - [Nombre del proyecto]"
-        # Dividimos por " - " y eliminamos SOLO el primer segmento ("Monitoreo").
-        # Tomamos partes[1:] para conservar: código + empresa + nombre completo.
-        # Esto preserva "Monitoreo" si forma parte del nombre del proyecto.
-        nombre_sin_ext = file_name.split(".")[0]  # Quitamos extensión primero
-        partes = nombre_sin_ext.split(" - ")
-        if len(partes) >= 2:
-            # Quitamos solo el primer segmento ("Monitoreo") y reunimos el resto
-            nombre_proyecto_estandar = " - ".join(partes[1:]).strip()
-        else:
-            # Último recurso: usamos el nombre completo sin extensión
-            nombre_proyecto_estandar = nombre_sin_ext.strip()
+        # ==========================================
+        # 🧹 LIMPIEZA Y NORMALIZACIÓN DE PROYECTO
+        # ==========================================
+        import re
+
+        # 1. Quitamos "Monitoreo" SOLO si está al inicio del nombre del archivo
+        nombre_temp = re.sub(r"^(monitoreo)\s*[\-]*\s*", "", file_name, flags=re.IGNORECASE)
+
+        # 2. Buscamos el índice del primer dígito numérico
+        indice_inicio = 0
+        for i, char in enumerate(nombre_temp):
+            if char.isdigit():
+                indice_inicio = i
+                break
+        
+        # 3. Extraemos desde el primer dígito y quitamos la extensión del archivo
+        nombre_proyecto_estandar = nombre_temp[indice_inicio:].split(".")[0].strip()
+
+        # 4. NORMALIZACIÓN: Forzar la primera letra después de un guion a mayúscula
+        nombre_proyecto_estandar = re.sub(r"-\s*([a-zñáéíóúü])", lambda m: m.group(0).upper(), nombre_proyecto_estandar)
 
         columnas_meta = [
             pl.lit(file_name).alias("archivo_origen"),
