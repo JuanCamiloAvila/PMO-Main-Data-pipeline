@@ -196,20 +196,33 @@ def extraer_equipo_interno(raw_rows, file_name, formato="LEGACY"):
     
     df = df.filter(pl.col("Horas_Presupuestadas").is_not_null())
     
-    # Extraemos el nombre del proyecto: el formato es
-    # "Monitoreo - [código] - [Empresa] - [Nombre del proyecto]"
-    # Dividimos por " - " y eliminamos SOLO el primer segmento ("Monitoreo").
-    # Tomamos partes[1:] para conservar: código + empresa + nombre completo.
-    # Esto preserva "Monitoreo" si forma parte del nombre del proyecto.
+    # ==========================================
+    # 🧹 LIMPIEZA Y NORMALIZACIÓN DE PROYECTO
+    # ==========================================
     if formato == "NUEVO":
-        nombre_sin_ext = file_name.split(".")[0]  # Quitamos extensión primero
-        partes = nombre_sin_ext.split(" - ")
-        if len(partes) >= 2:
-            # Quitamos solo el primer segmento ("Monitoreo") y reunimos el resto
-            nombre_archivo_limpio = " - ".join(partes[1:]).strip()
-        else:
-            # Último recurso: usamos el nombre completo sin extensión
-            nombre_archivo_limpio = nombre_sin_ext.strip()
+        import re
+        # Quitamos "Monitoreo" o "Nuevo" SOLO al inicio
+        nombre_temp = re.sub(r"^(monitoreo|nuevo)\s*[\-]*\s*", "", file_name, flags=re.IGNORECASE)
+        
+        indice_inicio = 0
+        for i, char in enumerate(nombre_temp):
+            if char.isdigit():
+                indice_inicio = i
+                break
+        nombre_archivo_limpio = nombre_temp[indice_inicio:].split(".")[0].strip()
+    else:
+        nombre_archivo_limpio = file_name.replace("Productividad: ", "").strip()
+    
+    # NORMALIZACIÓN: Forzar la primera letra después de un guion a mayúscula
+    import re
+    nombre_archivo_limpio = re.sub(r"-\s*([ a-zñáéíóúü])", lambda m: m.group(0).upper(), nombre_archivo_limpio)
+
+    df = df.with_columns([
+        pl.lit(file_name).alias("archivo_origen"),
+        pl.lit(nombre_archivo_limpio).alias("Proyecto")
+    ])
+
+    return df.select(["archivo_origen", "Proyecto", "nombre", "Rol", "Horas_Presupuestadas", "Costo_interno"])
 
     df = df.with_columns([
         pl.lit(file_name).alias("archivo_origen"),
