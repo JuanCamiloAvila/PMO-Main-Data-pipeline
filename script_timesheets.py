@@ -225,7 +225,23 @@ def process_timesheets(gc, folder_id: str, sector_label: str, name_filter: str =
 
     if "...1" in full_df.columns:
         full_df = full_df.rename({"...1": "consecutivo"})
-        
+    
+    # ==========================================
+    # 🚨 PARCHE HISTÓRICO: Limpieza de nombres de Proyecto
+    # ==========================================
+    def limpiar_proyecto_historico(texto):
+        if not texto: return texto
+        # 1. Fuerza "escuelas" en plural
+        t = re.sub(r'(?i)\ben escuela\b(?!s)', 'en escuelas', texto)
+        # 2. Capitaliza la primera letra después del primer guion
+        t = re.sub(r"-\s*([a-zñáéíóúü])", lambda m: m.group(0).upper(), t)
+        return t
+
+    full_df = full_df.with_columns(
+        pl.col("Proyecto").map_elements(limpiar_proyecto_historico, return_dtype=pl.Utf8)
+    )
+    # ==========================================
+
     date_formats = ["%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%Y-%m-%d %H:%M:%S", "%d-%m-%Y", "%d.%m.%Y", "%d/%m/%y"]
     # 🔥 DICCIONARIO INVERSO: Para convertir letras en números de mes
     mapa_meses_inv = {"ene": 1, "feb": 2, "mar": 3, "abr": 4, "may": 5, "jun": 6, "jul": 7, "ago": 8, "sep": 9, "oct": 10, "nov": 11, "dic": 12}
@@ -398,15 +414,21 @@ def run_pipeline():
         ])
 
         # =========================================================
-        # PASO 3: DICCIONARIO DE TARIFAS (Por Nombre Oficial y Año)
+        # PASO 3: CRUCE EXACTO DE TARIFAS (Por Nombre y Año)
         # =========================================================
+        # 1. Preparamos el maestro de tarifas extrayendo el año exacto
         tarifas_df = staff_rates_raw.select([
             pl.col("Nombre_oficial").alias("nombre_tarifa"),
             pl.col("Fecha inicio").cast(pl.Utf8).str.extract(r"(20\d{2})").alias("año_tarifa"),
             pl.col("Costo interno").cast(pl.Utf8).str.replace(",", ".").cast(pl.Float64, strict=False).fill_null(0.0).alias("Costo interno")
         ])
 
-        # Ahora cruzamos usando el "Nombre" ya limpio y el "Año_Fiscal"
+        # 2. Aseguramos que la columna del consolidado también sea texto limpio para el cruce
+        consolidated_df = consolidated_df.with_columns(
+            pl.col("Año_Fiscal").cast(pl.Utf8).alias("Año_Fiscal")
+        )
+
+        # 3. Hacemos el cruce exacto: Si es Timesheet 2025, busca Rate 2025 del usuario.
         consolidated_df = consolidated_df.join(
             tarifas_df,
             left_on=["Nombre", "Año_Fiscal"],
@@ -416,7 +438,7 @@ def run_pipeline():
         
         # --- CÁLCULO DE COSTO FINAL ---
         consolidated_df = consolidated_df.with_columns([
-            ((pl.col("Cantidad de horas") / 8) * pl.col("Costo interno").fill_null(0)).alias("costo_rate_interno")
+            ((pl.col("Cantidad de horas") / 8) * pl.col("Costo interno").fill_null(0.0)).alias("costo_rate_interno")
         ])
 
         if "Unnamed" in consolidated_df.columns:
