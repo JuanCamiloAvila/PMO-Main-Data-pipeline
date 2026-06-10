@@ -196,19 +196,20 @@ def extraer_equipo_interno(raw_rows, file_name, formato="LEGACY"):
     
     df = df.filter(pl.col("Horas_Presupuestadas").is_not_null())
     
-    # Limpiar nombre según el formato
+    # Extraemos el nombre del proyecto: el formato es
+    # "Monitoreo - [código] - [Empresa] - [Nombre del proyecto]"
+    # Dividimos por " - " y eliminamos SOLO el primer segmento ("Monitoreo").
+    # Tomamos partes[1:] para conservar: código + empresa + nombre completo.
+    # Esto preserva "Monitoreo" si forma parte del nombre del proyecto.
     if formato == "NUEVO":
-        import re 
-        
-        # Le dice a Python: Borra "Monitoreo" o "Nuevo" (y sus guiones) SOLO si están al inicio (^)
-        nombre_temp = re.sub(r"^(?i)(monitoreo|nuevo)\s*[\-]*\s*", "", file_name)
-        
-        indice_inicio = 0
-        for i, char in enumerate(nombre_temp):
-            if char.isdigit():
-                indice_inicio = i
-                break
-        nombre_archivo_limpio = nombre_temp[indice_inicio:].split(".")[0].strip()
+        nombre_sin_ext = file_name.split(".")[0]  # Quitamos extensión primero
+        partes = nombre_sin_ext.split(" - ")
+        if len(partes) >= 2:
+            # Quitamos solo el primer segmento ("Monitoreo") y reunimos el resto
+            nombre_archivo_limpio = " - ".join(partes[1:]).strip()
+        else:
+            # Último recurso: usamos el nombre completo sin extensión
+            nombre_archivo_limpio = nombre_sin_ext.strip()
 
     df = df.with_columns([
         pl.lit(file_name).alias("archivo_origen"),
