@@ -328,7 +328,7 @@ def run_pipeline():
             
         clean_projects_df = projects_df.select([
             pl.col("Tipo de proyecto").alias("sector"),
-            pl.col("Nombre de Proyecto").alias("proyecto"),
+            pl.col("Proyecto").alias("proyecto"),
             pl.col("Activo")
         ])
         valid_projects_list = clean_projects_df.get_column("proyecto").drop_nulls().to_list()
