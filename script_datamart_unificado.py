@@ -241,7 +241,7 @@ def run_unificacion():
         # Margen de Contribución Actual (Ingresos - Gastos - Costos Ejecutados)
         (pl.col("Ingresos_Reales") - pl.col("Gastos_Reales") - pl.col("Costo_Real_Ejecutado")).alias("Margen_Contribucion_Real")
     ])
-    
+
     # --- 4. TRAER LOS FILTROS DEL MAESTRO DE PROYECTOS ---
     print("📚 Adjuntando filtros globales del Maestro...")
     try:
@@ -257,7 +257,8 @@ def run_unificacion():
                 pl.col("Proyecto").alias("Nombre_Proyecto_Original"), 
                 pl.col("Tipo de proyecto").alias("Tipo_de_proyecto"),
                 pl.col("País de facturación proyecto").alias("Pais_Facturacion_Proyecto"),
-                pl.col("Activo").alias("Activo")
+                pl.col("Activo").alias("Activo"),
+                pl.col("PD")
             ]).unique(subset=["join_key"])
             
             maestro_final = maestro_final.join(df_filtros, on="join_key", how="left")
