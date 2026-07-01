@@ -473,6 +473,29 @@ def run_presupuestos_pipeline():
                 pl.lit(None).alias("correo_electronico")
             ])
         
+        # =========================================================
+        # ➕ NUEVO: INYECTAR FILTROS DEL MAESTRO DE PROYECTOS
+        # =========================================================
+        print("📚 Cargando dimensiones de filtrado desde el Maestro...")
+        try:
+            sh_maestro = gc.open_by_key("1Rx6e85e0vmLAF2SzOEnCl3k3C6VcYG_VRoBpyHxhqqw").worksheet("Proyectos")
+            raw_maestro = sh_maestro.get_all_values()
+            if raw_maestro and len(raw_maestro) > 1:
+                df_m = pl.DataFrame(raw_maestro[1:], schema=raw_maestro[0], orient="row")
+                
+                df_filtros = df_m.select([
+                    pl.col("Proyecto").str.strip_chars(),
+                    pl.col("Tipo de proyecto").alias("Tipo_de_proyecto"),
+                    pl.col("País de facturación proyecto").alias("Pais_Facturacion_Proyecto"),
+                    pl.col("Activo").alias("Activo")
+                ]).unique(subset=["Proyecto"])
+                
+                master_presupuesto = master_presupuesto.join(df_filtros, on="Proyecto", how="left")
+                print("   ✅ Filtros globales añadidos a Fact_Presupuesto_Horas.")
+        except Exception as e:
+            print(f"   🚨 Error al adjuntar filtros del maestro: {e}")
+
+        # Añadimos las nuevas columnas al select final
         master_presupuesto = master_presupuesto.select([
             "ID_Presupuesto", 
             "proyecto_id", 
@@ -483,7 +506,10 @@ def run_presupuestos_pipeline():
             "Costo_interno", 
             "Costo_Total_Proyecto", 
             "archivo_origen",
-            "correo_electronico" 
+            "correo_electronico",
+            "Tipo_de_proyecto",          # ➕
+            "Pais_Facturacion_Proyecto", # ➕
+            "Activo"                     # ➕
         ])
         
         print(f"\n📤 Exportando a Carpeta DWH: {DWH_FOLDER_ID}")

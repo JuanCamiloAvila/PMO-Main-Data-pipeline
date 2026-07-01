@@ -333,6 +333,18 @@ def run_pipeline():
         ])
         valid_projects_list = clean_projects_df.get_column("proyecto").drop_nulls().to_list()
 
+
+        # =========================================================
+        # ➕ NUEVO: PREPARAR DATAFRAME DE FILTROS GLOBALES
+        # =========================================================
+        df_filtros_globales = projects_df.select([
+            pl.col("Proyecto").str.strip_chars(),
+            pl.col("Tipo de proyecto").alias("Tipo_de_proyecto"),
+            pl.col("País de facturación proyecto").alias("Pais_Facturacion_Proyecto"),
+            pl.col("Activo").alias("Activo")
+        ]).unique(subset=["Proyecto"])
+
+
         # --- PROCESAMIENTO DINÁMICO POR AÑO Y SECTOR ---
         dfs_to_combine = []
         for year, config in SOURCES_CONFIG.items():
@@ -528,8 +540,63 @@ def run_pipeline():
         consolidated_df = consolidated_df.select(columnas_finales)
 
         # =========================================================
+        # 🧹 FILTRO DEFINITIVO: INTERSECCIÓN DE FUENTES REALES
+        # =========================================================
+        print("🔍 Buscando la intersección real de proyectos procesados en las otras fuentes...")
+        try:
+            # 1. Leer proyectos que SÍ se procesaron en Ingresos/Gastos (Base_Looker)
+            # El ID es el MASTER_SPREADSHEET_ID de tu primer script
+            id_ingresos_gastos = "1vUcnKrp5EfCbW5mh3L76x_UoyB4m9BPhJ_pKHPbxsGM"
+            sh_ig = gc.open_by_key(id_ingresos_gastos).worksheet("Base_Looker")
+            # En tu ORDEN_MAESTRO, 'Proyecto' es la columna 4 (D)
+            proyectos_ig = set(p.strip() for p in sh_ig.col_values(4)[1:] if p.strip())
+
+            # 2. Leer proyectos que SÍ se procesaron en Presupuestos (Fact_Presupuesto_Horas)
+            # Buscamos el archivo en la carpeta DWH
+            id_carpeta_dwh = "1_8cyY32pxRXU3Au0OZOor1wNN7uXO-wr"
+            archivos_dwh = gc.list_spreadsheet_files(folder_id=id_carpeta_dwh)
+            id_presupuestos = next((f['id'] for f in archivos_dwh if f['name'] == "Fact_Presupuesto_Horas"), None)
+
+            if id_presupuestos:
+                sh_ph = gc.open_by_key(id_presupuestos).worksheet("Datos")
+                # En master_presupuesto, 'Proyecto' es la columna 3 (C)
+                proyectos_ph = set(p.strip() for p in sh_ph.col_values(3)[1:] if p.strip())
+            else:
+                proyectos_ph = set()
+                print("   ⚠️ No se encontró 'Fact_Presupuesto_Horas'.")
+
+            # 3. La Intersección Estricta (El "Match" perfecto)
+            # Solo conservamos los proyectos que existen en AMBAS listas
+            proyectos_reales_comunes = proyectos_ig.intersection(proyectos_ph)
+
+            # 4. Aplicar la guillotina al DataFrame de Timesheets
+            if proyectos_reales_comunes:
+                filas_antes = len(consolidated_df)
+                consolidated_df = consolidated_df.filter(pl.col("Proyecto").is_in(list(proyectos_reales_comunes)))
+                filas_despues = len(consolidated_df)
+                print(f"   ✂️ Limpieza exitosa: Se eliminaron {filas_antes - filas_despues} registros huérfanos.")
+                print(f"   🎯 Proyectos válidos finales: {len(proyectos_reales_comunes)}")
+            else:
+                print("   ❌ CRÍTICO: La intersección de proyectos está vacía. Revisa las ejecuciones anteriores.")
+
+        except Exception as e:
+            print(f"   🚨 Error al intentar cruzar los proyectos reales: {e}")
+
+        # =========================================================
         # 📤 EXPORTACIÓN ÚNICA DEL CONSOLIDADO PLANA
         # =========================================================
+
+        # =========================================================
+        # ➕ NUEVO: CRUZAR FILTROS GLOBALES ANTES DE EXPORTAR
+        # =========================================================
+        consolidated_df = consolidated_df.join(df_filtros_globales, on="Proyecto", how="left")
+        
+        # Agregamos las nuevas dimensiones al orden de columnas
+        orden_r.extend(["Tipo_de_proyecto", "Pais_Facturacion_Proyecto", "Activo"])
+
+        columnas_finales = [col for col in orden_r if col in consolidated_df.columns]
+        consolidated_df = consolidated_df.select(columnas_finales)
+
         print("📤 Exportando Consolidado General (Tabla Plana)...")
         export_to_drive(gc, consolidated_df, "Productividad Equi Consolidado", CONSOLIDATED_FOLDER_ID)
 

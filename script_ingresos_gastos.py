@@ -227,15 +227,15 @@ def limpiar_dataframe_pmo(raw_rows, file_name, tipo, traductor, usar_columna_tip
             if col_usd in df.columns:
                 df = df.with_columns(
                     pl.col(col_usd).cast(pl.Utf8)
-                    .str.replace_all(r"[^0-9,.]", "")
+                    .str.replace_all(r"[^0-9,.\-]", "") # ✨ Agregamos \- para salvar el signo negativo
                     .str.replace_all(r"\.", "")
                     .str.replace(",", ".")
                     .alias(col_usd)
                 )
                 df = df.with_columns(pl.col(col_usd).cast(pl.Float64, strict=False))
                 
-                # Preparamos el filtro: al menos una de las columnas debe tener un monto válido > 0
-                condicion_usd = condicion_usd | (pl.col(col_usd).is_not_null() & (pl.col(col_usd) > 0))
+                # ✨ Cambiamos > 0 por != 0 para aceptar negativos (solo filtra los ceros)
+                condicion_usd = condicion_usd | (pl.col(col_usd).is_not_null() & (pl.col(col_usd) != 0))
                 tiene_filtro_usd = True
                 
         if tiene_filtro_usd:
@@ -244,12 +244,13 @@ def limpiar_dataframe_pmo(raw_rows, file_name, tipo, traductor, usar_columna_tip
         if "Monto con Impuestos" in df.columns:
             df = df.with_columns(
                 pl.col("Monto con Impuestos").cast(pl.Utf8)
-                .str.replace_all(r"[^0-9,.]", "")
+                .str.replace_all(r"[^0-9,.\-]", "") # ✨ Agregamos \- para salvar el signo negativo
                 .str.replace_all(r"\.", "") 
                 .str.replace(",", ".")
                 .alias("_temp_monto")
             )
-            df = df.filter((pl.col("_temp_monto") != "") & (pl.col("_temp_monto").cast(pl.Float64, strict=False) > 0)).drop("_temp_monto")
+            # ✨ Cambiamos > 0 por != 0 para aceptar negativos
+            df = df.filter((pl.col("_temp_monto") != "") & (pl.col("_temp_monto").cast(pl.Float64, strict=False) != 0)).drop("_temp_monto")
 
         if tipo == "Gasto":
             df = df.filter(
@@ -445,7 +446,29 @@ def run_finanzas_pipeline():
             # Filtramos columnas para mantener solo las de ORDEN_MAESTRO
             cols_looker = [c for c in ORDEN_MAESTRO if c in base_looker.columns]
             base_looker = base_looker.select(cols_looker)
-            
+
+            # =========================================================
+            # ➕ NUEVO: INYECTAR FILTROS DEL MAESTRO DE PROYECTOS
+            # =========================================================
+            print("📚 Cargando dimensiones de filtrado desde el Maestro...")
+            try:
+                sh_maestro = gc.open_by_key("1Rx6e85e0vmLAF2SzOEnCl3k3C6VcYG_VRoBpyHxhqqw").worksheet("Proyectos")
+                raw_maestro = sh_maestro.get_all_values()
+                if raw_maestro and len(raw_maestro) > 1:
+                    df_m = pl.DataFrame(raw_maestro[1:], schema=raw_maestro[0], orient="row")
+                    
+                    df_filtros = df_m.select([
+                        pl.col("Proyecto").str.strip_chars(),
+                        pl.col("Tipo de proyecto").alias("Tipo_de_proyecto"),
+                        pl.col("País de facturación proyecto").alias("Pais_Facturacion_Proyecto"),
+                        pl.col("Activo").alias("Activo")
+                    ]).unique(subset=["Proyecto"])
+                    
+                    base_looker = base_looker.join(df_filtros, on="Proyecto", how="left")
+                    print("   ✅ Filtros globales añadidos a Base_Looker.")
+            except Exception as e:
+                print(f"   🚨 Error al adjuntar filtros del maestro: {e}")
+        
             print(f"📊 Total registros consolidados en Base_Looker: {len(base_looker)} (Ingresos + Gastos)")
             
             # =========================================================
