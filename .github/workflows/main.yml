@@ -52,10 +52,12 @@ jobs:
         run: |
           echo "Iniciando actualización Horas Presupuestadas..."
           uv run python script_presupuesto_horas.py
-          
-      - name: Ejecutar Maestro Unificado
-        env:
-          GOOGLE_OAUTH_TOKEN: ${{ secrets.GOOGLE_OAUTH_TOKEN }}
-        run: |
-          echo "Iniciando actualización OBT Data Studio..."
-          uv run python script_datamart_unificado.py
+
+      #'''
+      #- name: Run Looker OBT Consolidator
+      #  env:
+      #    GOOGLE_OAUTH_TOKEN: ${{ secrets.GOOGLE_OAUTH_TOKEN }}
+      #  run: |
+      #    echo "Iniciando generación de tabla maestra para Looker Studio..."
+      #    uv run python datasource_consolidator.py
+        
