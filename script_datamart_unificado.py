@@ -1,5 +1,6 @@
 import os
 import json
+import time
 import polars as pl
 import gspread
 from google.oauth2.credentials import Credentials
@@ -17,6 +18,29 @@ ID_CARPETA_DESTINO_FINAL = "1Mzy21lddSd4JN01DWvolzMKceM48tzeE"
 # ==============================================================================
 # 2. AUTENTICACIÓN Y FUNCIONES AUXILIARES
 # ==============================================================================
+
+def ejecutar_con_reintento(func, *args, **kwargs):
+    """Ejecuta una función de la API de Google y aplica reintentos si ocurre un error 429."""
+    max_reintentos = 5
+    espera = 5  # Segundos iniciales de espera
+    
+    for intento in range(max_reintentos):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            # Comprobamos si el error está relacionado con la cuota de la API
+            if "429" in str(e) or "Quota exceeded" in str(e):
+                if intento < max_reintentos - 1:
+                    print(f"⚠️ Límite de API (429). Esperando {espera}s antes de reintentar... (Intento {intento + 1}/{max_reintentos})")
+                    time.sleep(espera)
+                    espera *= 2  # Duplica el tiempo de espera (5, 10, 20, 40...)
+                else:
+                    print("🚨 Se superó el máximo de reintentos permitidos.")
+                    raise e
+            else:
+                # Si es un error distinto (ej. Archivo no encontrado), rompe el código inmediatamente
+                raise e
+
 def get_gspread_client():
     scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
     token_str = os.environ.get('GOOGLE_OAUTH_TOKEN')
@@ -87,13 +111,19 @@ def run_unificacion():
     # --- 1. LEER ARCHIVOS Y FILTRAR COLUMNAS ---
     print("📥 Leyendo bases de datos y filtrando columnas...")
     
-    # 🎯 Finanzas (Actualizado con "Tipo_Movimiento")
+    # 🎯 Finanzas
     cols_finanzas = ["Proyecto", "Tipo_Movimiento", "Situación", "USD sin impuestos"] 
-    sh_finanzas = gc.open_by_key(ID_BASE_LOOKER).worksheet("Base_Looker")
-    df_finanzas = leer_hoja_segura(sh_finanzas.get_all_values())
+    
+    # Aplicamos el reintento al abrir el archivo y al descargar los valores
+    sh_finanzas = ejecutar_con_reintento(gc.open_by_key, ID_BASE_LOOKER).worksheet("Base_Looker")
+    raw_finanzas = ejecutar_con_reintento(sh_finanzas.get_all_values)
+    
+    df_finanzas = leer_hoja_segura(raw_finanzas)
     if not df_finanzas.is_empty():
         presentes = [c for c in cols_finanzas if c in df_finanzas.columns]
         df_finanzas = df_finanzas.select(presentes)
+
+    time.sleep(3)
 
     # 🎯 Presupuestos
     cols_presupuestos = ["Proyecto", "Horas_Presupuestadas", "Costo_Total_Proyecto"]
@@ -107,6 +137,8 @@ def run_unificacion():
             presentes = [c for c in cols_presupuestos if c in df_presupuestos.columns]
             df_presupuestos = df_presupuestos.select(presentes)
 
+    time.sleep(3)
+
     # 🎯 Timesheets
     cols_timesheets = ["Proyecto", "Cantidad de horas", "costo_rate_interno"]
     archivos_cons = gc.list_spreadsheet_files(folder_id=ID_CARPETA_CONSOLIDADO)
@@ -118,6 +150,8 @@ def run_unificacion():
         if not df_timesheets.is_empty():
             presentes = [c for c in cols_timesheets if c in df_timesheets.columns]
             df_timesheets = df_timesheets.select(presentes)
+
+    time.sleep(3)
 
     # --- 2. CREAR LLAVE ROBUSTA Y APLANAR (WIDE FORMAT) ---
     print("🗜️ Aplanando y calculando totales por proyecto...")
@@ -244,6 +278,7 @@ def run_unificacion():
 
     # --- 4. TRAER LOS FILTROS DEL MAESTRO DE PROYECTOS ---
     print("📚 Adjuntando filtros globales del Maestro...")
+    time.sleep(3)
     try:
         sh_maestro = gc.open_by_key(ID_MAESTRO_PROYECTOS).worksheet("Proyectos")
         raw_maestro = sh_maestro.get_all_values()
