@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import functools
 import polars as pl
 import gspread
 from google.oauth2.credentials import Credentials
@@ -16,31 +17,28 @@ ID_MAESTRO_PROYECTOS = "1Rx6e85e0vmLAF2SzOEnCl3k3C6VcYG_VRoBpyHxhqqw"
 ID_CARPETA_DESTINO_FINAL = "1Mzy21lddSd4JN01DWvolzMKceM48tzeE" 
 
 # ==============================================================================
-# 2. AUTENTICACIÓN Y FUNCIONES AUXILIARES
+# 2. AUTENTICACIÓN Y ESCUDO ANTI-BLOQUEOS (RETRYS)
 # ==============================================================================
 
-def ejecutar_con_reintento(func, *args, **kwargs):
-    """Ejecuta una función de la API de Google y aplica reintentos si ocurre un error 429."""
-    max_reintentos = 5
-    espera = 5  # Segundos iniciales de espera
-    
-    for intento in range(max_reintentos):
-        try:
-            return func(*args, **kwargs)
-        except Exception as e:
-            # Comprobamos si el error está relacionado con la cuota de la API
-            if "429" in str(e) or "Quota exceeded" in str(e):
-                if intento < max_reintentos - 1:
-                    print(f"⚠️ Límite de API (429). Esperando {espera}s antes de reintentar... (Intento {intento + 1}/{max_reintentos})")
-                    time.sleep(espera)
-                    espera *= 2  # Duplica el tiempo de espera (5, 10, 20, 40...)
-                else:
-                    print("🚨 Se superó el máximo de reintentos permitidos.")
-                    raise e
-            else:
-                # Si es un error distinto (ej. Archivo no encontrado), rompe el código inmediatamente
-                raise e
+def api_retry(max_retries=6):
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            for attempt in range(max_retries):
+                try:
+                    return func(*args, **kwargs)
+                except gspread.exceptions.APIError as e:
+                    if any(code in str(e) for code in ['429', '500', '502', '503']):
+                        wait_time = (attempt + 1) * 20
+                        print(f"    ⚠️ Límite de cuota o red. Reintentando en {wait_time}s... ({attempt+1}/{max_retries})")
+                        time.sleep(wait_time)
+                    else:
+                        raise e
+            raise Exception(f"❌ Falló tras {max_retries} reintentos en: {func.__name__}")
+        return wrapper
+    return decorator
 
+@api_retry()
 def get_gspread_client():
     scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
     token_str = os.environ.get('GOOGLE_OAUTH_TOKEN')
@@ -48,6 +46,17 @@ def get_gspread_client():
         return gspread.authorize(Credentials.from_authorized_user_info(json.loads(token_str), scopes))
     return gspread.authorize(Credentials.from_authorized_user_file('token.json', scopes))
 
+@api_retry()
+def get_sheet_values_safely(gc, file_id, sheet_name):
+    """Abre el archivo y extrae los valores usando el escudo de reintentos."""
+    return gc.open_by_key(file_id).worksheet(sheet_name).get_all_values()
+
+@api_retry()
+def list_files_safely(gc, folder_id):
+    """Lista los archivos de una carpeta usando el escudo de reintentos."""
+    return gc.list_spreadsheet_files(folder_id=folder_id)
+
+@api_retry()
 def export_to_drive(gc, df: pl.DataFrame, file_name: str, folder_id: str):
     if df.is_empty(): 
         print("⚠️ DataFrame vacío. No hay nada que exportar.")
@@ -113,10 +122,7 @@ def run_unificacion():
     
     # 🎯 Finanzas
     cols_finanzas = ["Proyecto", "Tipo_Movimiento", "Situación", "USD sin impuestos"] 
-    
-    # Aplicamos el reintento al abrir el archivo y al descargar los valores
-    sh_finanzas = ejecutar_con_reintento(gc.open_by_key, ID_BASE_LOOKER).worksheet("Base_Looker")
-    raw_finanzas = ejecutar_con_reintento(sh_finanzas.get_all_values)
+    raw_finanzas = get_sheet_values_safely(gc, ID_BASE_LOOKER, "Base_Looker")
     
     df_finanzas = leer_hoja_segura(raw_finanzas)
     if not df_finanzas.is_empty():
@@ -127,12 +133,12 @@ def run_unificacion():
 
     # 🎯 Presupuestos
     cols_presupuestos = ["Proyecto", "Horas_Presupuestadas", "Costo_Total_Proyecto"]
-    archivos_dwh = gc.list_spreadsheet_files(folder_id=ID_CARPETA_DWH)
+    archivos_dwh = list_files_safely(gc, ID_CARPETA_DWH)
     id_pres = next((f['id'] for f in archivos_dwh if f['name'] == "Fact_Presupuesto_Horas"), None)
     df_presupuestos = pl.DataFrame()
     if id_pres:
-        sh_presupuestos = gc.open_by_key(id_pres).worksheet("Datos")
-        df_presupuestos = leer_hoja_segura(sh_presupuestos.get_all_values())
+        raw_presupuestos = get_sheet_values_safely(gc, id_pres, "Datos")
+        df_presupuestos = leer_hoja_segura(raw_presupuestos)
         if not df_presupuestos.is_empty():
             presentes = [c for c in cols_presupuestos if c in df_presupuestos.columns]
             df_presupuestos = df_presupuestos.select(presentes)
@@ -141,12 +147,12 @@ def run_unificacion():
 
     # 🎯 Timesheets
     cols_timesheets = ["Proyecto", "Cantidad de horas", "costo_rate_interno"]
-    archivos_cons = gc.list_spreadsheet_files(folder_id=ID_CARPETA_CONSOLIDADO)
+    archivos_cons = list_files_safely(gc, ID_CARPETA_CONSOLIDADO)
     id_time = next((f['id'] for f in archivos_cons if f['name'] == "Productividad Equi Consolidado"), None)
     df_timesheets = pl.DataFrame()
     if id_time:
-        sh_timesheets = gc.open_by_key(id_time).worksheet("Datos")
-        df_timesheets = leer_hoja_segura(sh_timesheets.get_all_values())
+        raw_timesheets = get_sheet_values_safely(gc, id_time, "Datos")
+        df_timesheets = leer_hoja_segura(raw_timesheets)
         if not df_timesheets.is_empty():
             presentes = [c for c in cols_timesheets if c in df_timesheets.columns]
             df_timesheets = df_timesheets.select(presentes)
@@ -173,7 +179,7 @@ def run_unificacion():
         df_finanzas = df_finanzas.with_columns([
             pl.col("Proyecto").cast(pl.Utf8).str.to_uppercase().str.replace_all(r"\s+", " ").str.strip_chars().alias("join_key"),
             
-            # ✨ NUEVO: Limpieza robusta de números (elimina puntos de miles, cambia coma por punto)
+            # ✨ Limpieza robusta de números (elimina puntos de miles, cambia coma por punto)
             pl.col("USD sin impuestos")
             .cast(pl.Utf8)
             .str.replace_all(r"\.", "") # 1. Elimina los puntos (separador de miles)
@@ -280,8 +286,7 @@ def run_unificacion():
     print("📚 Adjuntando filtros globales del Maestro...")
     time.sleep(3)
     try:
-        sh_maestro = gc.open_by_key(ID_MAESTRO_PROYECTOS).worksheet("Proyectos")
-        raw_maestro = sh_maestro.get_all_values()
+        raw_maestro = get_sheet_values_safely(gc, ID_MAESTRO_PROYECTOS, "Proyectos")
         if raw_maestro and len(raw_maestro) > 1:
             df_m = leer_hoja_segura(raw_maestro)
             
