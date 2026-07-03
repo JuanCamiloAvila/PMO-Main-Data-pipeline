@@ -79,6 +79,9 @@ def api_retry(max_retries=6):
 # ==============================================================================
 # 3. FUNCIONES CORE DE DATOS (CON REINTENTOS)
 # ==============================================================================
+
+@api_retry()
+
 def safe_read_sheet(sheet, range_name=None) -> pl.DataFrame:
     if range_name:
         raw_data = sheet.get(range_name)
@@ -544,23 +547,22 @@ def run_pipeline():
         # =========================================================
         print("🔍 Buscando la intersección real de proyectos procesados en las otras fuentes...")
         try:
-            # 1. Leer proyectos que SÍ se procesaron en Ingresos/Gastos (Base_Looker)
-            # El ID es el MASTER_SPREADSHEET_ID de tu primer script
+            # 1. Leer proyectos que SÍ se procesaron en Ingresos/Gastos
             id_ingresos_gastos = "1vUcnKrp5EfCbW5mh3L76x_UoyB4m9BPhJ_pKHPbxsGM"
-            sh_ig = gc.open_by_key(id_ingresos_gastos).worksheet("Base_Looker")
-            # En tu ORDEN_MAESTRO, 'Proyecto' es la columna 4 (D)
-            proyectos_ig = set(p.strip() for p in sh_ig.col_values(4)[1:] if p.strip())
+            sh_ig = get_master_sheet_safely(gc, f"https://docs.google.com/spreadsheets/d/{id_ingresos_gastos}/edit", "Base_Looker")
+            df_ig = safe_read_sheet(sh_ig)
+            # Suponiendo que la columna 4 se llama "Proyecto" (ajusta el nombre si es distinto)
+            proyectos_ig = set(df_ig.get_column(df_ig.columns[3]).drop_nulls().str.strip_chars().to_list())
 
-            # 2. Leer proyectos que SÍ se procesaron en Presupuestos (Fact_Presupuesto_Horas)
-            # Buscamos el archivo en la carpeta DWH
+            # 2. Leer proyectos que SÍ se procesaron en Presupuestos
             id_carpeta_dwh = "1_8cyY32pxRXU3Au0OZOor1wNN7uXO-wr"
-            archivos_dwh = gc.list_spreadsheet_files(folder_id=id_carpeta_dwh)
+            archivos_dwh = list_files_safely(gc, id_carpeta_dwh) # <-- Usa tu función segura
             id_presupuestos = next((f['id'] for f in archivos_dwh if f['name'] == "Fact_Presupuesto_Horas"), None)
 
             if id_presupuestos:
-                sh_ph = gc.open_by_key(id_presupuestos).worksheet("Datos")
-                # En master_presupuesto, 'Proyecto' es la columna 3 (C)
-                proyectos_ph = set(p.strip() for p in sh_ph.col_values(3)[1:] if p.strip())
+                sh_ph = get_master_sheet_safely(gc, f"https://docs.google.com/spreadsheets/d/{id_presupuestos}/edit", "Datos")
+                df_ph = safe_read_sheet(sh_ph)
+                proyectos_ph = set(df_ph.get_column(df_ph.columns[2]).drop_nulls().str.strip_chars().to_list())
             else:
                 proyectos_ph = set()
                 print("   ⚠️ No se encontró 'Fact_Presupuesto_Horas'.")
